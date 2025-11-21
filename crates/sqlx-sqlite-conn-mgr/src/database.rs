@@ -10,6 +10,7 @@ use sqlx::{ConnectOptions, Pool, Sqlite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::error;
 
 /// SQLite database with connection pooling for concurrent reads and optional exclusive writes.
 ///
@@ -273,11 +274,7 @@ impl SqliteDatabase {
 
       // Remove from registry
       if let Err(e) = uncache_database(&self.path).await {
-         // TODO: Investigate use of "tracing" crate to log this error
-         #[cfg(debug_assertions)]
-         eprintln!("Failed to remove database from cache: {}", e);
-         #[cfg(not(debug_assertions))]
-         let _ = e; // Suppress unused variable warning
+         error!("Failed to remove database from cache: {}", e);
       }
 
       // This will await all readers to be returned
