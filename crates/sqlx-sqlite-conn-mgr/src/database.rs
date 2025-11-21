@@ -14,9 +14,9 @@ use tracing::error;
 
 /// SQLite database with connection pooling for concurrent reads and optional exclusive writes.
 ///
-/// The database is opened in read-write mode but can be used for read-only operations
-/// by calling `read_pool()`. Write operations are available by calling `acquire_writer()`
-/// which lazily initializes WAL mode on first use.
+/// Once the database is opened it can be used for read-only operations by calling `read_pool()`.
+/// Write operations are available by calling `acquire_writer()` which lazily initializes WAL mode
+/// on first use.
 ///
 /// # Example
 ///
@@ -67,7 +67,7 @@ impl SqliteDatabase {
    /// If the database is already connected, returns the existing connection.
    /// Multiple calls with the same path will return the same database instance.
    ///
-   /// The database is created if it doesn't exist. WAL mode is optionally enabled when
+   /// The database is created if it doesn't exist. WAL mode is enabled when
    /// `acquire_writer()` is first called.
    ///
    /// # Arguments
@@ -132,7 +132,8 @@ impl SqliteDatabase {
          // Why do we need to manually create the database file? We could just let the connection
          // create it if it doesn't exist, using `create_if_missing(true)`, right? Not if we called
          // connect and then our very first query was a read-only query, like `PRAGMA user_version;`,
-         // for example. That would fail because the read pool cannot create the file
+         // for example. That would fail because the read pool connections are read-only and cannot
+         // create the file
          if !db_exists && !is_memory_database(&path) {
             let create_options = SqliteConnectOptions::new()
                .filename(&path)
@@ -175,7 +176,7 @@ impl SqliteDatabase {
       .await
    }
 
-   /// Get a reference to the connection pool for executing SELECT queries
+   /// Get a reference to the connection pool for executing read queries
    ///
    /// Use this for concurrent read operations. Multiple readers can access
    /// the pool simultaneously.
@@ -367,6 +368,7 @@ mod tests {
                .fetch_one(db.read_pool().unwrap())
                .await
                .unwrap();
+
             assert_eq!(count, 12);
          }));
       }
@@ -673,6 +675,7 @@ mod tests {
                .fetch_all(db_clone.read_pool().unwrap())
                .await
                .unwrap();
+
             assert!(rows.len() > 0);
          }));
       }
@@ -700,6 +703,7 @@ mod tests {
          .fetch_one(db.read_pool().unwrap())
          .await
          .unwrap();
+
       assert_eq!(count.0, 2);
 
       db.remove().await.unwrap();
