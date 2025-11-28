@@ -173,6 +173,32 @@ const db = await Database.load('mydb.db', {
 > **Note:** Database paths are relative to the app's config directory. Unlike
 > `tauri-plugin-sql`, no `sqlite:` prefix is needed.
 
+### Parameter Binding and Types
+
+All query methods (`execute`, `fetchAll`, `fetchOne`) support parameter binding using
+the `$1`, `$2`, etc. syntax. Values must be of type `SqlValue`:
+
+```typescript
+type SqlValue = string | number | boolean | null | Uint8Array
+```
+
+Supported SQLite types:
+
+   * **TEXT** - `string` values (also used for DATE, TIME, DATETIME)
+   * **INTEGER** - `number` values (integers)
+   * **REAL** - `number` values (floating point)
+   * **BOOLEAN** - `boolean` values
+   * **NULL** - `null` value
+   * **BLOB** - `Uint8Array` for binary data
+
+```typescript
+// Example with different types
+await db.execute(
+   'INSERT INTO data (text, int, real, bool, blob) VALUES ($1, $2, $3, $4, $5)',
+   ['hello', 42, 3.14, true, new Uint8Array([1, 2, 3])]
+)
+```
+
 ### Executing Write Operations
 
 Use `execute()` for INSERT, UPDATE, DELETE, or any query that modifies data:
@@ -205,9 +231,46 @@ const deleteResult = await db.execute(
 )
 ```
 
+### Handling Errors
+
+Handle database errors gracefully using structured error responses:
+
+```typescript
+import type { SqliteError } from '@silvermine/tauri-plugin-sqlite';
+
+try {
+   await db.execute(
+      'INSERT INTO users (id, name) VALUES ($1, $2)',
+      [1, 'Alice']
+   );
+} catch (err) {
+   const error = err as SqliteError;
+
+   // Check error code for specific handling
+   if (error.code.startsWith('SQLITE_CONSTRAINT')) {
+      console.error('Constraint violation:', error.message);
+   } else if (error.code === 'DATABASE_NOT_LOADED') {
+      console.error('Database not initialized');
+   } else {
+      console.error('Database error:', error.code, error.message);
+   }
+}
+```
+
+Common error codes include:
+
+   * `SQLITE_CONSTRAINT` - Constraint violation (unique, foreign key, etc.)
+   * `SQLITE_NOTFOUND` - Table or column not found
+   * `DATABASE_NOT_LOADED` - Database hasn't been loaded yet
+   * `INVALID_PATH` - Invalid database path
+   * `IO_ERROR` - File system error
+   * `MIGRATION_ERROR` - Migration failed
+   * `READ_ONLY_QUERY_IN_EXECUTE` - Attempted to use execute() for a read-only query
+   * `MULTIPLE_ROWS_RETURNED` - `fetchOne()` query returned multiple rows
+
 ### Executing SELECT Queries
 
-Use `fetchAll()` for all read operations:
+Use `fetchAll()` or `fetchOne()` for all read operations:
 
 ```typescript
 type User = {id: number, name: string, email: string}
@@ -233,6 +296,11 @@ if (user) {
    console.log(`Found user: ${user.name}`)
 }
 ```
+
+> **Note:** `fetchOne()` validates that the query returns exactly 0 or 1 rows. If your
+> query returns multiple rows, it will throw a `MULTIPLE_ROWS_RETURNED` error. This helps
+> catch bugs where a query unexpectedly returns multiple results. Use `fetchAll()` if you
+> expect multiple rows.
 
 ### Closing Connections
 

@@ -1,10 +1,34 @@
 import { invoke } from '@tauri-apps/api/core'
 
+/**
+ * Valid SQLite parameter binding value types.
+ *
+ * SQLite supports a limited set of types for parameter binding:
+ * - `string` - TEXT, DATE, TIME, DATETIME
+ * - `number` - INTEGER, REAL
+ * - `boolean` - BOOLEAN
+ * - `null` - NULL
+ * - `Uint8Array` - BLOB (binary data)
+ */
+export type SqlValue = string | number | boolean | null | Uint8Array
+
 export interface QueryResult {
    /** The number of rows affected by the query. */
    rowsAffected: number
    /** The last inserted row ID (SQLite ROWID). */
    lastInsertId: number
+}
+
+/**
+ * Structured error returned from SQLite operations.
+ *
+ * All errors thrown by the plugin will have this structure.
+ */
+export interface SqliteError {
+   /** Machine-readable error code (e.g., "SQLITE_CONSTRAINT", "DATABASE_NOT_LOADED") */
+   code: string
+   /** Human-readable error message */
+   message: string
 }
 
 /**
@@ -108,7 +132,7 @@ export default class Database {
     * );
     * ```
     */
-   async execute(query: string, bindValues?: unknown[]): Promise<QueryResult> {
+   async execute(query: string, bindValues?: SqlValue[]): Promise<QueryResult> {
       const [rowsAffected, lastInsertId] = await invoke<[number, number]>(
          'plugin:sqlite|execute',
          {
@@ -145,7 +169,7 @@ export default class Database {
     * );
     * ```
     */
-   async fetchAll<T>(query: string, bindValues?: unknown[]): Promise<T> {
+   async fetchAll<T>(query: string, bindValues?: SqlValue[]): Promise<T> {
       const result = await invoke<T>('plugin:sqlite|fetch_all', {
          db: this.path,
          query,
@@ -177,8 +201,8 @@ export default class Database {
     * }
     * ```
     */
-   async fetchOne<T>(query: string, bindValues?: unknown[]): Promise<T | undefined> {
-      const result = await invoke<T | undefined>('plugin:sqlite|select_one', {
+   async fetchOne<T>(query: string, bindValues?: SqlValue[]): Promise<T | undefined> {
+      const result = await invoke<T | undefined>('plugin:sqlite|fetch_one', {
          db: this.path,
          query,
          values: bindValues ?? []
