@@ -92,14 +92,13 @@ impl SqliteDatabase {
    ///
    /// ```no_run
    /// use sqlx_sqlite_conn_mgr::{SqliteDatabase, SqliteDatabaseConfig};
-   /// use std::time::Duration;
    /// use std::sync::Arc;
    ///
    /// # async fn example() -> Result<(), sqlx_sqlite_conn_mgr::Error> {
    /// // Customize configuration when defaults don't meet your requirements
    /// let custom_config = SqliteDatabaseConfig {
    ///    max_read_connections: 10,
-   ///    idle_timeout: Duration::from_secs(60),
+   ///    idle_timeout_secs: 60,
    /// };
    /// let db = SqliteDatabase::connect("test.db", Some(custom_config)).await?;
    /// # Ok(())
@@ -151,7 +150,9 @@ impl SqliteDatabase {
          let read_pool = SqlitePoolOptions::new()
             .max_connections(config.max_read_connections)
             .min_connections(0)
-            .idle_timeout(Some(config.idle_timeout))
+            .idle_timeout(Some(std::time::Duration::from_secs(
+               config.idle_timeout_secs,
+            )))
             .connect_with(read_options)
             .await?;
 
@@ -161,7 +162,9 @@ impl SqliteDatabase {
          let write_conn = SqlitePoolOptions::new()
             .max_connections(1)
             .min_connections(0)
-            .idle_timeout(Some(config.idle_timeout))
+            .idle_timeout(Some(std::time::Duration::from_secs(
+               config.idle_timeout_secs,
+            )))
             .connect_with(write_options)
             .await?;
 
@@ -529,15 +532,13 @@ mod tests {
 
    #[tokio::test]
    async fn test_custom_config() {
-      use std::time::Duration;
-
       let test_path = std::env::current_dir()
          .unwrap()
          .join("test_custom_config.db");
 
       let custom_config = SqliteDatabaseConfig {
          max_read_connections: 10,
-         idle_timeout: Duration::from_secs(60),
+         idle_timeout_secs: 60,
       };
 
       // Verify custom config is accepted and connection works

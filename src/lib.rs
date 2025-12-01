@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use serde::Deserialize;
-use tauri::{Runtime, plugin::Builder as PluginBuilder};
+use tauri::{Manager, Runtime, plugin::Builder as PluginBuilder};
 use tokio::sync::RwLock;
 
 mod commands;
@@ -68,14 +68,26 @@ impl Builder {
       Self
    }
 
-   /// Build the plugin.
-   ///
-   /// Full implementation with preload and lifecycle hooks will be added in a future PR.
+   /// Build the plugin with full command registration and state management.
    pub fn build<R: Runtime>(self) -> tauri::plugin::TauriPlugin<R, Option<PluginConfig>> {
-      // Future PR: Full implementation with setup, preload, and cleanup hooks
       PluginBuilder::<R, Option<PluginConfig>>::new("sqlite")
-         .setup(|_app, _api| {
-            // Future PR: Database preloading and lifecycle management
+         .invoke_handler(tauri::generate_handler![
+            commands::load,
+            commands::execute,
+            commands::execute_transaction,
+            commands::fetch_all,
+            commands::fetch_one,
+            commands::close,
+            commands::close_all,
+            commands::remove,
+         ])
+         .setup(|app, _api| {
+            // Initialize database instances state
+            app.manage(DbInstances::default());
+
+            // Future PR: Database preloading from config
+            // Future PR: Cleanup on app exit
+
             Ok(())
          })
          .build()
