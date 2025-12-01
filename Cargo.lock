@@ -3576,6 +3576,7 @@ dependencies = [
 name = "sqlx-sqlite-conn-mgr"
 version = "0.8.6"
 dependencies = [
+ "serde",
  "sqlx",
  "thiserror 2.0.17",
  "tokio",

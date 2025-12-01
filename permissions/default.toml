@@ -1,8 +1,18 @@
 # Default permissions for the sqlite plugin
-# This file defines which commands are available to the frontend
+#
+# This file defines the default set of permissions for database operations.
+# All commands are included by default to provide a fully functional plugin.
+# For more restrictive permissions, create a custom permission set.
 
 [default]
-description = "Default permissions for the sqlite plugin"
+description = "Default permissions for the sqlite plugin - allows all database operations"
 permissions = [
-   "allow-hello",
+   "allow-load",
+   "allow-execute",
+   "allow-execute-transaction",
+   "allow-fetch-all",
+   "allow-fetch-one",
+   "allow-close",
+   "allow-close-all",
+   "allow-remove",
 ]

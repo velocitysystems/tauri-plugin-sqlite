@@ -1,4 +1,13 @@
 fn main() {
-   // TODO: Add commands to the plugin
-   tauri_plugin::Builder::new(&["hello"]).build();
+   tauri_plugin::Builder::new(&[
+      "load",
+      "execute",
+      "execute_transaction",
+      "fetch_all",
+      "fetch_one",
+      "close",
+      "close_all",
+      "remove",
+   ])
+   .build();
 }

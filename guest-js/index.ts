@@ -265,9 +265,17 @@ export default class Database {
     *
     * Closes the database connection pool(s) for this specific database.
     *
+    * @returns `true` if the database was loaded and successfully closed,
+    *          `false` if the database was not loaded (nothing to close)
+    *
     * @example
     * ```ts
-    * const success = await db.close()
+    * const wasClosed = await db.close()
+    * if (wasClosed) {
+    *    console.log('Database closed successfully')
+    * } else {
+    *    console.log('Database was not loaded')
+    * }
     * ```
     */
    async close(): Promise<boolean> {
@@ -284,12 +292,11 @@ export default class Database {
     *
     * @example
     * ```ts
-    * const success = await Database.closeAll()
+    * await Database.closeAll()
     * ```
     */
-   static async closeAll(): Promise<boolean> {
-      const success = await invoke<boolean>('plugin:sqlite|close_all')
-      return success
+   static async closeAll(): Promise<void> {
+      await invoke<void>('plugin:sqlite|close_all')
    }
 
    /**
@@ -300,9 +307,17 @@ export default class Database {
     *
     * **Warning:** This permanently deletes the database files from disk. Use with caution!
     *
+    * @returns `true` if the database was loaded and successfully removed,
+    *          `false` if the database was not loaded (nothing to remove)
+    *
     * @example
     * ```ts
-    * const success = await db.remove()
+    * const wasRemoved = await db.remove()
+    * if (wasRemoved) {
+    *    console.log('Database deleted successfully')
+    * } else {
+    *    console.log('Database was not loaded')
+    * }
     * ```
     */
    async remove(): Promise<boolean> {

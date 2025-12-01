@@ -17,7 +17,7 @@ pooling, write serialization, and proper resource management.
    * **Optimized Connection Pooling**: Separate read and write pools for concurrent reads,
      even while writing
    * **Write Serialization**: Exclusive write access through connection manager
-   * **Migration Support**: Uses SQLx's database migration system (runs during preload)
+   * **Migration Support**: Uses SQLx's database migration system
    * **Custom Configuration**: Configure read pool size and idle timeouts
    * **Type Safety**: Full TypeScript bindings
    * **Resource Management**: Proper cleanup on application exit
@@ -332,7 +332,7 @@ console.log(`Transfer ID: ${results[2].lastInsertId}`);
 
 **How it works:**
 
-   * Automatically executes `BEGIN` before running statements
+   * Automatically executes `BEGIN IMMEDIATE` before running statements
    * Executes all statements in order
    * Commits with `COMMIT` if all statements succeed
    * Rolls back with `ROLLBACK` if any statement fails
@@ -360,85 +360,8 @@ await db.remove()
 
 ## Migrations
 
-Migrations run automatically during database preload at application startup.
-
-### Setting Up Migrations
-
-`src-tauri/src/lib.rs`
-
-```rust
-use tauri_plugin_sqlite::{Builder, Migration, MigrationKind};
-
-fn main() {
-    let migrations = vec![
-        // Version 1: Create initial schema
-        Migration {
-            version: 1,
-            description: "create_users_table",
-            sql: vec!["CREATE TABLE users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL UNIQUE,
-                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-            )"],
-            kind: MigrationKind::Up,
-        },
-        // Version 2: Add new column
-        Migration {
-            version: 2,
-            description: "add_users_role",
-            sql: vec!["ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"],
-            kind: MigrationKind::Up,
-        },
-        // Version 3: Create index and add trigger (multiple statements)
-        Migration {
-            version: 3,
-            description: "create_email_index_and_trigger",
-            sql: vec![
-                "CREATE INDEX idx_users_email ON users(email)",
-                "CREATE TRIGGER update_timestamp AFTER UPDATE ON users
-                    BEGIN
-                        UPDATE users SET created_at = strftime('%s', 'now') WHERE id = NEW.id;
-                    END",
-            ],
-            kind: MigrationKind::Up,
-        },
-    ];
-
-    tauri::Builder::default()
-        .plugin(
-            Builder::new()
-                .add_migrations("mydb.db", migrations)
-                .build(),
-        )
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
-```
-
-### Preloading Databases
-
-Add databases to `tauri.conf.json` to connect and run migrations at startup:
-
-```json
-{
-   "plugins": {
-      "sqlite": {
-         "preload": ["mydb.db", "cache.db"]
-      }
-   }
-}
-```
-
-When preloaded:
-
-1. The plugin connects to each database
-2. Runs any pending migrations defined in `add_migrations()`
-3. Keeps the connection open and ready for use
-
-> **Important:** Migrations only run during preload. If you load a database
-> dynamically with `Database.load()`, migrations will not run unless it was
-> preloaded.
+> **Note:** Database migration support is a planned feature and will be added in a
+> future release. It will be based on SQLx's migration framework.
 
 ## Query Parameter Binding
 
@@ -526,7 +449,7 @@ const db = Database.get('mydb.db')
 // Connection happens on first query
 ```
 
-##### `Database.closeAll(): Promise<boolean>`
+##### `Database.closeAll(): Promise<void>`
 
 Close all database connections.
 
@@ -578,7 +501,8 @@ if (user) {
 
 ##### `close(): Promise<boolean>`
 
-Close this database connection.
+Close this database connection. Returns `true` if the database was loaded and closed,
+`false` if it wasn't loaded.
 
 ```typescript
 await db.close()
@@ -586,7 +510,8 @@ await db.close()
 
 ##### `remove(): Promise<boolean>`
 
-Close the connection and permanently delete database file(s).
+Close the connection and permanently delete database file(s). Returns `true` if
+the database was loaded and removed, `false` if it wasn't loaded.
 
 > ⚠️ **Warning:** This cannot be undone!
 
