@@ -250,8 +250,12 @@ impl SqliteDatabase {
       // Acquire connection from pool (max=1 ensures exclusive access)
       let mut conn = self.write_conn.acquire().await?;
 
-      // Initialize WAL mode on first use (idempotent and safe)
-      if !self.wal_initialized.load(Ordering::SeqCst) {
+      // Initialize WAL mode on first use (atomic check-and-set)
+      if self
+         .wal_initialized
+         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+         .is_ok()
+      {
          sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&mut *conn)
             .await?;
@@ -260,8 +264,6 @@ impl SqliteDatabase {
          sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&mut *conn)
             .await?;
-
-         self.wal_initialized.store(true, Ordering::SeqCst);
       }
 
       // Return WriteGuard wrapping the pool connection
