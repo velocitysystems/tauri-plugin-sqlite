@@ -69,13 +69,11 @@ pub struct SqliteDatabase {
 impl SqliteDatabase {
    /// Get the database file path as a string
    ///
-   /// Used internally for ATTACH DATABASE statements
+   /// Used internally (crate-private) for ATTACH DATABASE statements
    pub(crate) fn path_str(&self) -> String {
       self.path.to_string_lossy().to_string()
    }
-}
 
-impl SqliteDatabase {
    /// Connect to a SQLite database
    ///
    /// If the database is already connected, returns the existing connection.
@@ -295,14 +293,17 @@ impl SqliteDatabase {
    ///
    /// # Example
    ///
-   /// ```ignore
+   /// ```no_run
    /// use sqlx_sqlite_conn_mgr::SqliteDatabase;
    ///
+   /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
    /// // sqlx::migrate! is evaluated at compile time
    /// static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
    ///
    /// let db = SqliteDatabase::connect("test.db", None).await?;
    /// db.run_migrations(&MIGRATOR).await?;
+   /// # Ok(())
+   /// # }
    /// ```
    pub async fn run_migrations(&self, migrator: &sqlx::migrate::Migrator) -> Result<()> {
       // Ensure WAL mode is initialized via acquire_writer

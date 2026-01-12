@@ -7,6 +7,7 @@ use tauri::{Emitter, Manager, RunEvent, Runtime, plugin::Builder as PluginBuilde
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
+mod builders;
 mod commands;
 mod decode;
 mod error;
@@ -91,20 +92,29 @@ pub struct MigrationEvent {
 /// # Example
 ///
 /// ```ignore
+/// // Note: This example uses `ignore` instead of `no_run` because
+/// // tauri::generate_context!() requires tauri.conf.json at compile time,
+/// // which cannot be provided in doc test environments.
 /// use tauri_plugin_sqlite::Builder;
 ///
+/// # fn main() {
 /// // Basic setup (no migrations):
 /// tauri::Builder::default()
 ///     .plugin(Builder::new().build())
 ///     .run(tauri::generate_context!())
 ///     .expect("error while running tauri application");
+/// # }
 /// ```
 ///
 /// # Example with migrations
 ///
 /// ```ignore
+/// // Note: This example uses `ignore` instead of `no_run` because
+/// // tauri::generate_context!() requires tauri.conf.json at compile time,
+/// // which cannot be provided in doc test environments.
 /// use tauri_plugin_sqlite::Builder;
 ///
+/// # fn main() {
 /// // Setup with migrations:
 /// tauri::Builder::default()
 ///     .plugin(
@@ -115,6 +125,7 @@ pub struct MigrationEvent {
 ///     )
 ///     .run(tauri::generate_context!())
 ///     .expect("error while running tauri application");
+/// # }
 /// ```
 #[derive(Default)]
 pub struct Builder {
@@ -142,10 +153,14 @@ impl Builder {
    ///
    /// # Example
    ///
-   /// ```ignore
+   /// ```no_run
+   /// use tauri_plugin_sqlite::Builder;
+   ///
+   /// # fn example() {
    /// Builder::new()
-   ///     .add_migrations("main.db", sqlx::migrate!("./migrations"))
-   ///     .build()
+   ///     .add_migrations("main.db", sqlx::migrate!("./doc-test-fixtures/migrations"))
+   ///     .build::<tauri::Wry>();
+   /// # }
    /// ```
    pub fn add_migrations(mut self, path: &str, migrator: Migrator) -> Self {
       self.migrations.insert(path.to_string(), Arc::new(migrator));
