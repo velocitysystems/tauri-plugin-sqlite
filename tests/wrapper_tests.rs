@@ -180,8 +180,8 @@ async fn test_transactions() {
    // Successful transaction commits
    let results = db
       .execute_transaction(vec![
-         ("UPDATE t SET val = val - 30 WHERE id = 1".into(), vec![]),
-         ("UPDATE t SET val = val + 30 WHERE id = 2".into(), vec![]),
+         ("UPDATE t SET val = val - 30 WHERE id = 1", vec![]),
+         ("UPDATE t SET val = val + 30 WHERE id = 2", vec![]),
       ])
       .await
       .unwrap();
@@ -199,8 +199,8 @@ async fn test_transactions() {
    // Failed transaction rolls back (NULL violates NOT NULL)
    let err = db
       .execute_transaction(vec![
-         ("UPDATE t SET val = 999 WHERE id = 1".into(), vec![]),
-         ("INSERT INTO t (id, val) VALUES (3, NULL)".into(), vec![]),
+         ("UPDATE t SET val = 999 WHERE id = 1", vec![]),
+         ("INSERT INTO t (id, val) VALUES (3, NULL)", vec![]),
       ])
       .await;
 

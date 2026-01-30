@@ -15,7 +15,7 @@ use crate::{
    DbInstances, Error, MigrationEvent, MigrationStates, MigrationStatus, Result, WriteQueryResult,
    transactions::{
       ActiveInterruptibleTransaction, ActiveInterruptibleTransactions, ActiveRegularTransactions,
-      Statement,
+      Statement, TransactionWriter,
    },
    wrapper::DatabaseWrapper,
 };
@@ -237,7 +237,13 @@ pub async fn execute_transaction(
    let regular_txs_clone = regular_txs.inner().clone();
 
    let handle = tokio::spawn(async move {
-      let mut builder = wrapper_clone.execute_transaction(stmt_tuples);
+      // Convert String to &str for execute_transaction
+      let stmt_refs: Vec<(&str, Vec<JsonValue>)> = stmt_tuples
+         .iter()
+         .map(|(query, values)| (query.as_str(), values.clone()))
+         .collect();
+
+      let mut builder = wrapper_clone.execute_transaction(stmt_refs);
 
       if let Some(specs) = resolved_specs {
          builder = builder.attach(specs);
@@ -399,17 +405,18 @@ pub async fn get_migration_events(
    }
 }
 
-/// Execute initial statements in an interruptible transaction and return a token.
+/// Begin an interruptible transaction and return a token.
 ///
 /// This begins a transaction, executes the initial statements, and returns a token
 /// that can be used to continue, commit, or rollback the transaction.
 /// The writer connection is held for the entire transaction duration.
 #[tauri::command]
-pub async fn execute_interruptible_transaction(
+pub async fn begin_interruptible_transaction(
    db_instances: State<'_, DbInstances>,
    active_txs: State<'_, ActiveInterruptibleTransactions>,
    db: String,
    initial_statements: Vec<Statement>,
+   attached: Option<Vec<AttachedDatabaseSpec>>,
 ) -> Result<TransactionToken> {
    let instances = db_instances.0.read().await;
 
@@ -420,11 +427,26 @@ pub async fn execute_interruptible_transaction(
    // Generate unique transaction ID
    let transaction_id = Uuid::new_v4().to_string();
 
-   // Acquire writer for the entire transaction
-   let mut writer = wrapper.acquire_writer().await?;
+   // Acquire appropriate writer based on whether databases are attached
+   let mut writer = if let Some(specs) = attached {
+      let resolved_specs = resolve_attached_specs(specs, &instances)?;
+      let guard =
+         sqlx_sqlite_conn_mgr::acquire_writer_with_attached(wrapper.inner(), resolved_specs)
+            .await?;
+      TransactionWriter::Attached(guard)
+   } else {
+      TransactionWriter::Regular(wrapper.acquire_writer().await?)
+   };
 
    // Begin transaction
-   sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
+   match &mut writer {
+      TransactionWriter::Regular(w) => {
+         sqlx::query("BEGIN IMMEDIATE").execute(&mut **w).await?;
+      }
+      TransactionWriter::Attached(w) => {
+         sqlx::query("BEGIN IMMEDIATE").execute(&mut **w).await?;
+      }
+   }
 
    // Execute initial statements
    for statement in initial_statements {
@@ -432,7 +454,10 @@ pub async fn execute_interruptible_transaction(
       for value in statement.values {
          q = crate::wrapper::bind_value(q, value);
       }
-      q.execute(&mut *writer).await?;
+      match &mut writer {
+         TransactionWriter::Regular(w) => q.execute(&mut **w).await?,
+         TransactionWriter::Attached(w) => q.execute(&mut **w).await?,
+      };
    }
 
    // Store transaction state
@@ -463,8 +488,8 @@ pub async fn transaction_continue(
             .await?;
 
          // Execute statements on the transaction
-         match tx.execute_statements(statements).await {
-            Ok(()) => {
+         match tx.continue_with(statements).await {
+            Ok(_results) => {
                // Re-insert transaction - if this fails, tx is dropped and auto-rolled back
                match active_txs.insert(token.db_path.clone(), tx).await {
                   Ok(()) => Ok(Some(token)),

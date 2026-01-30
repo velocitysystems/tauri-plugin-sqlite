@@ -21,7 +21,7 @@ beforeEach(() => {
       if (cmd === 'plugin:sqlite|execute_transaction') {
          return [];
       }
-      if (cmd === 'plugin:sqlite|execute_interruptible_transaction') {
+      if (cmd === 'plugin:sqlite|begin_interruptible_transaction') {
          return { dbPath: (args as { db: string }).db, transactionId: 'test-tx-id' };
       }
       if (cmd === 'plugin:sqlite|transaction_continue') {
@@ -225,25 +225,54 @@ describe('Database commands', () => {
       expect(events).toEqual([]);
    });
 
-   it('executeInterruptibleTransaction', async () => {
-      const tx = await Database.get('t.db').executeInterruptibleTransaction([
+   it('beginInterruptibleTransaction', async () => {
+      const tx = await Database.get('t.db').beginInterruptibleTransaction([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Alice' ] ],
       ]);
 
-      expect(lastCmd).toBe('plugin:sqlite|execute_interruptible_transaction');
+      expect(lastCmd).toBe('plugin:sqlite|begin_interruptible_transaction');
       expect(lastArgs.db).toBe('t.db');
       expect(lastArgs.initialStatements).toEqual([
          { query: 'INSERT INTO users (name) VALUES ($1)', values: [ 'Alice' ] },
       ]);
+      expect(lastArgs.attached).toBe(null);
       expect(tx).toBeInstanceOf(Object);
    });
 
-   it('InterruptibleTransaction.continue()', async () => {
-      const tx = await Database.get('test.db').executeInterruptibleTransaction([
+   it('beginInterruptibleTransaction with attached databases', async () => {
+      const tx = await Database.get('main.db')
+         .beginInterruptibleTransaction([
+            [ 'DELETE FROM users WHERE id IN (SELECT user_id FROM archive.archived_users)' ],
+         ])
+         .attach([
+            {
+               databasePath: 'archive.db',
+               schemaName: 'archive',
+               mode: 'readOnly',
+            },
+         ]);
+
+      expect(lastCmd).toBe('plugin:sqlite|begin_interruptible_transaction');
+      expect(lastArgs.db).toBe('main.db');
+      expect(lastArgs.initialStatements).toEqual([
+         { query: 'DELETE FROM users WHERE id IN (SELECT user_id FROM archive.archived_users)', values: [] },
+      ]);
+      expect(lastArgs.attached).toEqual([
+         {
+            databasePath: 'archive.db',
+            schemaName: 'archive',
+            mode: 'readOnly',
+         },
+      ]);
+      expect(tx).toBeInstanceOf(Object);
+   });
+
+   it('InterruptibleTransaction.continueWith()', async () => {
+      const tx = await Database.get('test.db').beginInterruptibleTransaction([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Alice' ] ],
       ]);
 
-      const tx2 = await tx.continue([
+      const tx2 = await tx.continueWith([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Bob' ] ],
       ]);
 
@@ -254,7 +283,7 @@ describe('Database commands', () => {
    });
 
    it('InterruptibleTransaction.commit()', async () => {
-      const tx = await Database.get('test.db').executeInterruptibleTransaction([
+      const tx = await Database.get('test.db').beginInterruptibleTransaction([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Alice' ] ],
       ]);
 
@@ -265,7 +294,7 @@ describe('Database commands', () => {
    });
 
    it('InterruptibleTransaction.rollback()', async () => {
-      const tx = await Database.get('test.db').executeInterruptibleTransaction([
+      const tx = await Database.get('test.db').beginInterruptibleTransaction([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Alice' ] ],
       ]);
 
@@ -276,7 +305,7 @@ describe('Database commands', () => {
    });
 
    it('InterruptibleTransaction.read()', async () => {
-      const tx = await Database.get('test.db').executeInterruptibleTransaction([
+      const tx = await Database.get('test.db').beginInterruptibleTransaction([
          [ 'INSERT INTO users (name) VALUES ($1)', [ 'Alice' ] ],
       ]);
 

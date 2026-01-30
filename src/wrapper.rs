@@ -33,9 +33,50 @@ impl DatabaseWrapper {
       &self.inner
    }
 
+   #[doc(hidden)]
+   pub fn inner_for_testing(&self) -> &Arc<SqliteDatabase> {
+      &self.inner
+   }
+
    /// Acquire writer connection (for pausable transactions)
    pub async fn acquire_writer(&self) -> Result<sqlx_sqlite_conn_mgr::WriteGuard, Error> {
       Ok(self.inner.acquire_writer().await?)
+   }
+
+   /// Begin an interruptible transaction that can be paused and resumed
+   ///
+   /// Returns a builder that allows attaching databases before executing the transaction.
+   ///
+   /// # Example
+   ///
+   /// ```no_run
+   /// # use tauri_plugin_sqlite::DatabaseWrapper;
+   /// # use serde_json::json;
+   /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+   /// # let db: DatabaseWrapper = todo!();
+   /// // Start transaction with initial statements
+   /// let mut tx = db
+   ///    .begin_interruptible_transaction()
+   ///    .execute(vec![
+   ///       ("DELETE FROM cache WHERE expired = 1", vec![])
+   ///    ])
+   ///    .await?;
+   ///
+   /// // Continue with more work
+   /// let results = tx.continue_with(vec![
+   ///    crate::transactions::Statement {
+   ///       query: "INSERT INTO items (name) VALUES (?)".to_string(),
+   ///       values: vec![json!("item1")],
+   ///    }
+   /// ]).await?;
+   ///
+   /// // Commit when done
+   /// tx.commit().await?;
+   /// # Ok(())
+   /// # }
+   /// ```
+   pub fn begin_interruptible_transaction(&self) -> InterruptibleTransactionBuilder {
+      InterruptibleTransactionBuilder::new(self.clone())
    }
 
    /// Connect to a SQLite database via the connection manager
@@ -97,42 +138,38 @@ impl DatabaseWrapper {
       crate::builders::ExecuteBuilder::new(Arc::clone(&self.inner), query, values)
    }
 
-   /// Create a builder for transaction execution
+   /// Execute multiple statements atomically within a transaction
    ///
-   /// Returns a builder that can optionally attach databases before executing.
+   /// Returns a builder that allows attaching databases before executing the transaction.
+   /// All statements either succeed together or fail together.
    ///
-   /// This method:
-   /// 1. Begins a transaction (BEGIN)
-   /// 2. Executes all statements in order
-   /// 3. Commits on success (COMMIT)
-   /// 4. Rolls back on any error (ROLLBACK)
-   ///
-   /// The writer is held for the entire transaction, ensuring atomicity.
+   /// Use this when you have a batch of writes and don't need to read data mid-transaction.
+   /// For transactions requiring reads of uncommitted data, use `begin_interruptible_transaction()`.
    ///
    /// # Example
    ///
    /// ```no_run
    /// # use tauri_plugin_sqlite::DatabaseWrapper;
+   /// # use serde_json::json;
    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
    /// # let db: DatabaseWrapper = todo!();
-   /// # let statements = vec![];
-   /// // Without attached databases
-   /// db.execute_transaction(statements.clone()).await?;
+   /// // Execute multiple inserts atomically
+   /// let results = db
+   ///    .execute_transaction(vec![
+   ///       ("INSERT INTO users (name) VALUES (?)", vec![json!("Alice")]),
+   ///       ("INSERT INTO audit_log (action) VALUES (?)", vec![json!("user_created")])
+   ///    ])
+   ///    .await?;
    ///
-   /// // With attached database(s)
-   /// # let spec1 = todo!();
-   /// # let spec2 = todo!();
-   /// db.execute_transaction(statements)
-   ///   .attach(vec![spec1, spec2])
-   ///   .await?;
+   /// println!("User ID: {}", results[0].last_insert_id);
    /// # Ok(())
    /// # }
    /// ```
    pub fn execute_transaction(
       &self,
-      statements: Vec<(String, Vec<JsonValue>)>,
-   ) -> crate::builders::TransactionBuilder {
-      crate::builders::TransactionBuilder::new(Arc::clone(&self.inner), statements)
+      statements: Vec<(&str, Vec<JsonValue>)>,
+   ) -> TransactionExecutionBuilder {
+      TransactionExecutionBuilder::new(self.clone(), statements)
    }
 
    /// Create a builder for SELECT queries returning multiple rows
@@ -227,6 +264,223 @@ impl DatabaseWrapper {
       // Remove via Arc (handles both owned and shared cases)
       self.inner.remove().await?;
       Ok(())
+   }
+}
+
+/// Builder for interruptible transactions with optional attached databases
+pub struct InterruptibleTransactionBuilder {
+   db: DatabaseWrapper,
+   attached: Vec<sqlx_sqlite_conn_mgr::AttachedSpec>,
+}
+
+impl InterruptibleTransactionBuilder {
+   fn new(db: DatabaseWrapper) -> Self {
+      Self {
+         db,
+         attached: Vec::new(),
+      }
+   }
+
+   /// Attach databases for cross-database operations
+   ///
+   /// # Example
+   ///
+   /// ```no_run
+   /// # use tauri_plugin_sqlite::DatabaseWrapper;
+   /// # use sqlx_sqlite_conn_mgr::{AttachedSpec, AttachedMode};
+   /// # use serde_json::json;
+   /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+   /// # let db: DatabaseWrapper = todo!();
+   /// # let archive_db: std::sync::Arc<sqlx_sqlite_conn_mgr::SqliteDatabase> = todo!();
+   /// let mut tx = db
+   ///    .begin_interruptible_transaction()
+   ///    .attach(vec![AttachedSpec {
+   ///       database: archive_db,
+   ///       schema_name: "archive".to_string(),
+   ///       mode: AttachedMode::ReadOnly,
+   ///    }])
+   ///    .execute(vec![
+   ///       ("INSERT INTO items SELECT * FROM archive.items", vec![])
+   ///    ])
+   ///    .await?;
+   ///
+   /// tx.commit().await?;
+   /// # Ok(())
+   /// # }
+   /// ```
+   pub fn attach(mut self, specs: Vec<sqlx_sqlite_conn_mgr::AttachedSpec>) -> Self {
+      self.attached = specs;
+      self
+   }
+
+   /// Execute the transaction with initial statements
+   ///
+   /// Returns an `InterruptibleTransaction` that can be continued, read from, committed, or rolled back.
+   pub async fn execute(
+      self,
+      initial_statements: Vec<(&str, Vec<JsonValue>)>,
+   ) -> Result<InterruptibleTransaction, Error> {
+      use crate::transactions::{ActiveInterruptibleTransaction, TransactionWriter};
+
+      // Acquire appropriate writer based on whether databases are attached
+      let mut writer = if self.attached.is_empty() {
+         TransactionWriter::Regular(self.db.acquire_writer().await?)
+      } else {
+         let guard =
+            sqlx_sqlite_conn_mgr::acquire_writer_with_attached(self.db.inner(), self.attached)
+               .await?;
+         TransactionWriter::Attached(guard)
+      };
+
+      // Begin transaction
+      writer.begin_immediate().await?;
+
+      // Create active transaction and execute initial statements
+      let mut active_tx = ActiveInterruptibleTransaction::new(
+         "direct_rust_api".to_string(),
+         uuid::Uuid::new_v4().to_string(),
+         writer,
+      );
+
+      active_tx.continue_with(initial_statements).await?;
+
+      Ok(InterruptibleTransaction { inner: active_tx })
+   }
+}
+
+/// An active interruptible transaction that can be continued, read from, committed, or rolled back
+///
+/// This transaction holds a write lock on the database and will automatically rollback
+/// if dropped without an explicit commit.
+#[must_use = "if unused, the transaction is immediately rolled back"]
+pub struct InterruptibleTransaction {
+   inner: crate::transactions::ActiveInterruptibleTransaction,
+}
+
+impl InterruptibleTransaction {
+   /// Continue transaction with additional statements
+   ///
+   /// Returns write results for each statement executed.
+   pub async fn continue_with(
+      &mut self,
+      statements: Vec<crate::transactions::Statement>,
+   ) -> Result<Vec<WriteQueryResult>, Error> {
+      self.inner.continue_with(statements).await
+   }
+
+   /// Execute a read query within this transaction
+   ///
+   /// This allows reading uncommitted changes made within the transaction.
+   pub async fn read(
+      &mut self,
+      query: String,
+      values: Vec<JsonValue>,
+   ) -> Result<Vec<indexmap::IndexMap<String, JsonValue>>, Error> {
+      self.inner.read(query, values).await
+   }
+
+   /// Commit this transaction
+   ///
+   /// Consumes the transaction, making all changes permanent.
+   pub async fn commit(self) -> Result<(), Error> {
+      self.inner.commit().await
+   }
+
+   /// Rollback this transaction
+   ///
+   /// Consumes the transaction, discarding all changes.
+   pub async fn rollback(self) -> Result<(), Error> {
+      self.inner.rollback().await
+   }
+}
+
+/// Builder for regular atomic transactions
+pub struct TransactionExecutionBuilder {
+   db: DatabaseWrapper,
+   statements: Vec<(String, Vec<JsonValue>)>,
+   attached: Vec<sqlx_sqlite_conn_mgr::AttachedSpec>,
+}
+
+impl TransactionExecutionBuilder {
+   fn new(db: DatabaseWrapper, statements: Vec<(&str, Vec<JsonValue>)>) -> Self {
+      Self {
+         db,
+         statements: statements
+            .into_iter()
+            .map(|(query, values)| (query.to_string(), values))
+            .collect(),
+         attached: Vec::new(),
+      }
+   }
+
+   /// Attach databases for cross-database operations
+   pub fn attach(mut self, specs: Vec<sqlx_sqlite_conn_mgr::AttachedSpec>) -> Self {
+      self.attached = specs;
+      self
+   }
+
+   /// Execute the transaction atomically
+   ///
+   /// All statements execute within a single transaction. If any statement fails,
+   /// all changes are rolled back automatically.
+   pub async fn execute(self) -> Result<Vec<WriteQueryResult>, Error> {
+      use crate::transactions::TransactionWriter;
+
+      // Acquire appropriate writer based on whether databases are attached
+      let mut writer = if self.attached.is_empty() {
+         TransactionWriter::Regular(self.db.acquire_writer().await?)
+      } else {
+         let guard =
+            sqlx_sqlite_conn_mgr::acquire_writer_with_attached(self.db.inner(), self.attached)
+               .await?;
+         TransactionWriter::Attached(guard)
+      };
+
+      // Begin transaction
+      writer.begin_immediate().await?;
+
+      // Execute all statements
+      let exec_result = async {
+         let mut results = Vec::new();
+         for (query, values) in self.statements {
+            let mut q = sqlx::query(&query);
+            for value in values {
+               q = bind_value(q, value);
+            }
+            let exec_result = writer.execute_query(q).await?;
+            results.push(WriteQueryResult {
+               rows_affected: exec_result.rows_affected(),
+               last_insert_id: exec_result.last_insert_rowid(),
+            });
+         }
+         Ok::<Vec<WriteQueryResult>, Error>(results)
+      }
+      .await;
+
+      // Commit or rollback
+      match exec_result {
+         Ok(results) => {
+            writer.commit().await?;
+            writer.detach_if_attached().await?;
+            Ok(results)
+         }
+         Err(e) => {
+            writer.rollback().await?;
+            if let Err(detach_err) = writer.detach_if_attached().await {
+               tracing::error!("detach_all failed after rollback: {}", detach_err);
+            }
+            Err(e)
+         }
+      }
+   }
+}
+
+impl std::future::IntoFuture for TransactionExecutionBuilder {
+   type Output = Result<Vec<WriteQueryResult>, Error>;
+   type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send>>;
+
+   fn into_future(self) -> Self::IntoFuture {
+      Box::pin(self.execute())
    }
 }
 

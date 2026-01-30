@@ -64,6 +64,10 @@ pub enum Error {
    #[error("invalid transaction token")]
    InvalidTransactionToken,
 
+   /// Transaction has already been committed or rolled back.
+   #[error("transaction has already been finalized (committed or rolled back)")]
+   TransactionAlreadyFinalized,
+
    /// Generic error for operations that don't fit other categories.
    #[error("{0}")]
    Other(String),
@@ -93,6 +97,7 @@ impl Error {
          Error::TransactionAlreadyActive(_) => "TRANSACTION_ALREADY_ACTIVE".to_string(),
          Error::NoActiveTransaction(_) => "NO_ACTIVE_TRANSACTION".to_string(),
          Error::InvalidTransactionToken => "INVALID_TRANSACTION_TOKEN".to_string(),
+         Error::TransactionAlreadyFinalized => "TRANSACTION_ALREADY_FINALIZED".to_string(),
          Error::Other(_) => "ERROR".to_string(),
       }
    }

@@ -7,28 +7,95 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use sqlx::{Column, Row};
-use sqlx_sqlite_conn_mgr::WriteGuard;
+use sqlx_sqlite_conn_mgr::{AttachedWriteGuard, WriteGuard};
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 use tracing::debug;
 
-use crate::{Error, Result};
+use crate::{Error, Result, WriteQueryResult};
+
+/// Wrapper around WriteGuard or AttachedWriteGuard to unify transaction handling
+pub enum TransactionWriter {
+   Regular(WriteGuard),
+   Attached(AttachedWriteGuard),
+}
+
+impl TransactionWriter {
+   /// Execute a query on either writer type
+   pub(crate) async fn execute_query<'a>(
+      &mut self,
+      query: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+   ) -> Result<sqlx::sqlite::SqliteQueryResult> {
+      match self {
+         Self::Regular(w) => query.execute(&mut **w).await.map_err(Into::into),
+         Self::Attached(w) => query.execute(&mut **w).await.map_err(Into::into),
+      }
+   }
+
+   /// Fetch all rows from either writer type
+   pub(crate) async fn fetch_all<'a>(
+      &mut self,
+      query: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+   ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+      match self {
+         Self::Regular(w) => query.fetch_all(&mut **w).await.map_err(Into::into),
+         Self::Attached(w) => query.fetch_all(&mut **w).await.map_err(Into::into),
+      }
+   }
+
+   /// Begin an immediate transaction
+   pub(crate) async fn begin_immediate(&mut self) -> Result<()> {
+      self.execute_query(sqlx::query("BEGIN IMMEDIATE")).await?;
+      Ok(())
+   }
+
+   /// Commit the current transaction
+   pub(crate) async fn commit(&mut self) -> Result<()> {
+      self.execute_query(sqlx::query("COMMIT")).await?;
+      Ok(())
+   }
+
+   /// Rollback the current transaction
+   pub(crate) async fn rollback(&mut self) -> Result<()> {
+      self.execute_query(sqlx::query("ROLLBACK")).await?;
+      Ok(())
+   }
+
+   /// Detach all attached databases if this is an attached writer
+   pub(crate) async fn detach_if_attached(self) -> Result<()> {
+      if let Self::Attached(w) = self {
+         w.detach_all().await?;
+      }
+      Ok(())
+   }
+}
 
 /// Active transaction state holding the writer and metadata
 #[must_use = "if unused, the transaction is immediately rolled back"]
 pub struct ActiveInterruptibleTransaction {
    db_path: String,
    transaction_id: String,
-   writer: WriteGuard,
+   writer: Option<TransactionWriter>,
 }
 
 impl ActiveInterruptibleTransaction {
-   pub fn new(db_path: String, transaction_id: String, writer: WriteGuard) -> Self {
+   pub fn new(db_path: String, transaction_id: String, writer: TransactionWriter) -> Self {
       Self {
          db_path,
          transaction_id,
-         writer,
+         writer: Some(writer),
       }
+   }
+
+   fn writer_mut(&mut self) -> Result<&mut TransactionWriter> {
+      self
+         .writer
+         .as_mut()
+         .ok_or(Error::TransactionAlreadyFinalized)
+   }
+
+   fn take_writer(&mut self) -> Result<TransactionWriter> {
+      self.writer.take().ok_or(Error::TransactionAlreadyFinalized)
    }
 
    pub fn db_path(&self) -> &str {
@@ -57,7 +124,7 @@ impl ActiveInterruptibleTransaction {
          q = crate::wrapper::bind_value(q, value);
       }
 
-      let rows = q.fetch_all(&mut *self.writer).await?;
+      let rows = self.writer_mut()?.fetch_all(q).await?;
 
       let mut results = Vec::new();
       for row in rows {
@@ -73,29 +140,53 @@ impl ActiveInterruptibleTransaction {
       Ok(results)
    }
 
-   /// Execute statements on this transaction
-   pub async fn execute_statements(&mut self, statements: Vec<Statement>) -> Result<()> {
+   /// Continue transaction with additional statements
+   ///
+   /// Accepts either `Statement` structs or tuples of `(&str, Vec<JsonValue>)`.
+   pub async fn continue_with<S: Into<Statement>, I: IntoIterator<Item = S>>(
+      &mut self,
+      statements: I,
+   ) -> Result<Vec<WriteQueryResult>> {
+      let mut results = Vec::new();
+      let writer = self.writer_mut()?;
       for statement in statements {
+         let statement = statement.into();
          let mut q = sqlx::query(&statement.query);
          for value in statement.values {
             q = crate::wrapper::bind_value(q, value);
          }
-         q.execute(&mut *self.writer).await?;
+         let exec_result = writer.execute_query(q).await?;
+         results.push(WriteQueryResult {
+            rows_affected: exec_result.rows_affected(),
+            last_insert_id: exec_result.last_insert_rowid(),
+         });
       }
-      Ok(())
+      Ok(results)
    }
 
    /// Commit this transaction
    pub async fn commit(mut self) -> Result<()> {
-      sqlx::query("COMMIT").execute(&mut *self.writer).await?;
-      debug!("Transaction committed for db: {}", self.db_path);
+      let mut writer = self.take_writer()?;
+      writer.commit().await?;
+
+      let db_path = self.db_path.clone();
+      writer.detach_if_attached().await?;
+
+      debug!("Transaction committed for db: {}", db_path);
       Ok(())
    }
 
    /// Rollback this transaction
    pub async fn rollback(mut self) -> Result<()> {
-      sqlx::query("ROLLBACK").execute(&mut *self.writer).await?;
-      debug!("Transaction rolled back for db: {}", self.db_path);
+      let mut writer = self.take_writer()?;
+      writer.rollback().await?;
+
+      let db_path = self.db_path.clone();
+      if let Err(detach_err) = writer.detach_if_attached().await {
+         tracing::error!("detach_all failed after rollback: {}", detach_err);
+      }
+
+      debug!("Transaction rolled back for db: {}", db_path);
       Ok(())
    }
 }
@@ -107,15 +198,32 @@ pub struct Statement {
    pub values: Vec<JsonValue>,
 }
 
+impl From<(&str, Vec<JsonValue>)> for Statement {
+   fn from((query, values): (&str, Vec<JsonValue>)) -> Self {
+      Self {
+         query: query.to_string(),
+         values,
+      }
+   }
+}
+
+impl From<(String, Vec<JsonValue>)> for Statement {
+   fn from((query, values): (String, Vec<JsonValue>)) -> Self {
+      Self { query, values }
+   }
+}
+
 impl Drop for ActiveInterruptibleTransaction {
    fn drop(&mut self) {
-      // On drop, the WriteGuard is dropped which returns connection to pool.
+      // If writer is still present, it means commit/rollback wasn't called.
       // SQLite will automatically ROLLBACK the transaction when the connection
       // is returned to the pool if no explicit COMMIT was issued.
-      debug!(
-         "Dropping transaction for db: {}, tx_id: {} (will auto-rollback)",
-         self.db_path, self.transaction_id
-      );
+      if self.writer.is_some() {
+         debug!(
+            "Dropping transaction for db: {}, tx_id: {} (will auto-rollback)",
+            self.db_path, self.transaction_id
+         );
+      }
    }
 }
 

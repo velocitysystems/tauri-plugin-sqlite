@@ -100,7 +100,7 @@ export class InterruptibleTransaction {
     *
     * @example
     * ```ts
-    * let tx = await db.executeInterruptibleTransaction([
+    * let tx = await db.beginInterruptibleTransaction([
     *    ['INSERT INTO users (name) VALUES ($1)', ['Alice']]
     * ]);
     *
@@ -119,7 +119,7 @@ export class InterruptibleTransaction {
    }
 
    /**
-    * **continue**
+    * **continueWith**
     *
     * Execute additional statements within this transaction and return a new
     * transaction handle.
@@ -129,14 +129,14 @@ export class InterruptibleTransaction {
     *
     * @example
     * ```ts
-    * let tx = await db.executeInterruptibleTransaction([...]);
-    * tx = await tx.continue([
+    * let tx = await db.beginInterruptibleTransaction([...]);
+    * tx = await tx.continueWith([
     *    ['INSERT INTO users (name) VALUES ($1)', ['Bob']]
     * ]);
     * await tx.commit();
     * ```
     */
-   public async continue(statements: Array<[string, SqlValue[]?]>): Promise<InterruptibleTransaction> {
+   public async continueWith(statements: Array<[string, SqlValue[]?]>): Promise<InterruptibleTransaction> {
       const token = await invoke<{ dbPath: string; transactionId: string }>(
          'plugin:sqlite|transaction_continue',
          {
@@ -163,7 +163,7 @@ export class InterruptibleTransaction {
     *
     * @example
     * ```ts
-    * let tx = await db.executeInterruptibleTransaction([...]);
+    * let tx = await db.beginInterruptibleTransaction([...]);
     * [...]
     * await tx.commit();
     * ```
@@ -182,7 +182,7 @@ export class InterruptibleTransaction {
     *
     * @example
     * ```ts
-    * let tx = await db.executeInterruptibleTransaction([...]);
+    * let tx = await db.beginInterruptibleTransaction([...]);
     * [...]
     * await tx.rollback();
     * ```
@@ -420,6 +420,61 @@ class ExecuteBuilder implements PromiseLike<WriteQueryResult> {
 }
 
 /**
+ * Builder for interruptible transaction operations
+ */
+class InterruptibleTransactionBuilder implements PromiseLike<InterruptibleTransaction> {
+   private readonly _db: Database;
+   private readonly _initialStatements: Array<[string, SqlValue[]?]>;
+   private _attached: AttachedDatabaseSpec[];
+
+   public constructor(
+      db: Database,
+      initialStatements: Array<[string, SqlValue[]?]>,
+      attached: AttachedDatabaseSpec[] = []
+   ) {
+      this._db = db;
+      this._initialStatements = initialStatements;
+      this._attached = attached;
+   }
+
+   /**
+    * Attach databases for cross-database transactions
+    */
+   public attach(specs: AttachedDatabaseSpec[]): this {
+      this._attached = specs;
+      return this;
+   }
+
+   /**
+    * Make the builder directly awaitable
+    */
+   public then<TResult1 = InterruptibleTransaction, TResult2 = never>(
+      onfulfilled?: ((value: InterruptibleTransaction) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+   ): PromiseLike<TResult1 | TResult2> {
+      return this._execute().then(onfulfilled, onrejected);
+   }
+
+   private async _execute(): Promise<InterruptibleTransaction> {
+      const token = await invoke<{ dbPath: string; transactionId: string }>(
+         'plugin:sqlite|begin_interruptible_transaction',
+         {
+            db: this._db.path,
+            initialStatements: this._initialStatements.map(([ query, values ]) => {
+               return {
+                  query,
+                  values: values ?? [],
+               };
+            }),
+            attached: this._attached.length > 0 ? this._attached : null,
+         }
+      );
+
+      return new InterruptibleTransaction(token.dbPath, token.transactionId);
+   }
+}
+
+/**
  * Builder for transaction operations
  */
 class TransactionBuilder implements PromiseLike<WriteQueryResult[]> {
@@ -597,7 +652,7 @@ export default class Database {
     * **Use this method** when you have a batch of writes to execute and
     * don't need to read data mid-transaction. For transactions that
     * require reading uncommitted data to decide how to proceed, use
-    * `executeInterruptibleTransaction()` instead.
+    * `beginInterruptibleTransaction()` instead.
     *
     * The function automatically:
     * - Begins a transaction (BEGIN IMMEDIATE)
@@ -765,7 +820,7 @@ export default class Database {
    }
 
    /**
-    * **executeInterruptibleTransaction**
+    * **beginInterruptibleTransaction**
     *
     * Begins an interruptible transaction for cases where you need to
     * **read data mid-transaction to decide how to proceed**. For example,
@@ -788,12 +843,12 @@ export default class Database {
     * writer connection is held for the entire duration - keep transactions short.
     *
     * @param initialStatements - Array of [query, values?] tuples to execute initially
-    * @returns Promise that resolves with an InterruptibleTransaction handle
+    * @returns Builder for setting up the transaction with optional attached databases
     *
     * @example
     * ```ts
     * // Insert an order and read back its ID
-    * let tx = await db.executeInterruptibleTransaction([
+    * let tx = await db.beginInterruptibleTransaction([
     *    ['INSERT INTO orders (user_id, total) VALUES ($1, $2)', [userId, 0]]
     * ]);
     *
@@ -805,7 +860,7 @@ export default class Database {
     * const orderId = orders[0].id;
     *
     * // Use the ID in subsequent writes
-    * tx = await tx.continue([
+    * tx = await tx.continueWith([
     *    [
     *       'INSERT INTO order_items (order_id, product_id) VALUES ($1, $2)',
     *       [ orderId, productId ],
@@ -814,24 +869,29 @@ export default class Database {
     *
     * await tx.commit();
     * ```
+    *
+    * @example
+    * ```ts
+    * // Transaction with attached database
+    * let tx = await db.beginInterruptibleTransaction([
+    *    ['DELETE FROM users WHERE archived = 1']
+    * ]).attach([{
+    *    databasePath: 'archive.db',
+    *    schemaName: 'archive',
+    *    mode: 'readWrite'
+    * }]);
+    *
+    * tx = await tx.continueWith([
+    *    ['INSERT INTO archive.users SELECT * FROM users WHERE archived = 1']
+    * ]);
+    *
+    * await tx.commit();
+    * ```
     */
-   public async executeInterruptibleTransaction(
+   public beginInterruptibleTransaction(
       initialStatements: Array<[string, SqlValue[]?]>
-   ): Promise<InterruptibleTransaction> {
-      const token = await invoke<{ dbPath: string; transactionId: string }>(
-         'plugin:sqlite|execute_interruptible_transaction',
-         {
-            db: this.path,
-            initialStatements: initialStatements.map(([ query, values ]) => {
-               return {
-                  query,
-                  values: values ?? [],
-               };
-            }),
-         }
-      );
-
-      return new InterruptibleTransaction(token.dbPath, token.transactionId);
+   ): InterruptibleTransactionBuilder {
+      return new InterruptibleTransactionBuilder(this, initialStatements);
    }
 
    /**

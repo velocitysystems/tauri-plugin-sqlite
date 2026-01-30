@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
-use sqlx_sqlite_conn_mgr::{AttachedSpec, AttachedWriteGuard};
-
-use tracing::error;
+use sqlx_sqlite_conn_mgr::AttachedSpec;
 
 use crate::Error;
 use crate::wrapper::{WriteQueryResult, bind_value};
@@ -228,54 +226,6 @@ impl IntoFuture for ExecuteBuilder {
    }
 }
 
-/// Builder for transaction operations
-pub struct TransactionBuilder {
-   db: Arc<sqlx_sqlite_conn_mgr::SqliteDatabase>,
-   statements: Vec<(String, Vec<JsonValue>)>,
-   attached: Vec<AttachedSpec>,
-}
-
-impl TransactionBuilder {
-   pub(crate) fn new(
-      db: Arc<sqlx_sqlite_conn_mgr::SqliteDatabase>,
-      statements: Vec<(String, Vec<JsonValue>)>,
-   ) -> Self {
-      Self {
-         db,
-         statements,
-         attached: Vec::new(),
-      }
-   }
-
-   /// Attach additional databases for this transaction
-   pub fn attach(mut self, attached: Vec<AttachedSpec>) -> Self {
-      self.attached = attached;
-      self
-   }
-
-   /// Execute the transaction
-   pub async fn execute(self) -> Result<Vec<WriteQueryResult>, Error> {
-      if self.attached.is_empty() {
-         // No attached databases - use regular writer
-         execute_transaction_with_writer(self.db.acquire_writer().await?, self.statements).await
-      } else {
-         // With attached database(s) - acquire writer with attached database(s)
-         let guard =
-            sqlx_sqlite_conn_mgr::acquire_writer_with_attached(&self.db, self.attached).await?;
-         execute_transaction_with_attached(guard, self.statements).await
-      }
-   }
-}
-
-impl IntoFuture for TransactionBuilder {
-   type Output = Result<Vec<WriteQueryResult>, Error>;
-   type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
-
-   fn into_future(self) -> Self::IntoFuture {
-      Box::pin(self.execute())
-   }
-}
-
 /// Helper to decode SQLite rows to JSON
 fn decode_rows(
    rows: Vec<sqlx::sqlite::SqliteRow>,
@@ -293,94 +243,4 @@ fn decode_rows(
       values.push(value);
    }
    Ok(values)
-}
-
-/// Execute a transaction with proper BEGIN/COMMIT/ROLLBACK handling
-async fn execute_transaction_with_writer(
-   mut writer: sqlx_sqlite_conn_mgr::WriteGuard,
-   statements: Vec<(String, Vec<JsonValue>)>,
-) -> Result<Vec<WriteQueryResult>, Error> {
-   // Begin transaction
-   sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
-
-   // Execute all statements
-   let result = async {
-      let mut results = Vec::new();
-      for (query, values) in statements {
-         let mut q = sqlx::query(&query);
-         for value in values {
-            q = bind_value(q, value);
-         }
-         let exec_result = q.execute(&mut *writer).await?;
-         results.push(WriteQueryResult {
-            rows_affected: exec_result.rows_affected(),
-            last_insert_id: exec_result.last_insert_rowid(),
-         });
-      }
-      Ok::<Vec<WriteQueryResult>, Error>(results)
-   }
-   .await;
-
-   // Commit or rollback
-   match result {
-      Ok(results) => {
-         sqlx::query("COMMIT").execute(&mut *writer).await?;
-         Ok(results)
-      }
-      Err(e) => match sqlx::query("ROLLBACK").execute(&mut *writer).await {
-         Ok(_) => Err(e),
-         Err(rollback_err) => Err(Error::TransactionRollbackFailed {
-            transaction_error: e.to_string(),
-            rollback_error: rollback_err.to_string(),
-         }),
-      },
-   }
-}
-
-/// Execute a transaction with attached databases
-async fn execute_transaction_with_attached(
-   mut guard: AttachedWriteGuard,
-   statements: Vec<(String, Vec<JsonValue>)>,
-) -> Result<Vec<WriteQueryResult>, Error> {
-   // Begin transaction
-   sqlx::query("BEGIN IMMEDIATE").execute(&mut *guard).await?;
-
-   // Execute all statements
-   let result = async {
-      let mut results = Vec::new();
-      for (query, values) in statements {
-         let mut q = sqlx::query(&query);
-         for value in values {
-            q = bind_value(q, value);
-         }
-         let exec_result = q.execute(&mut *guard).await?;
-         results.push(WriteQueryResult {
-            rows_affected: exec_result.rows_affected(),
-            last_insert_id: exec_result.last_insert_rowid(),
-         });
-      }
-      Ok::<Vec<WriteQueryResult>, Error>(results)
-   }
-   .await;
-
-   // Commit or rollback
-   match result {
-      Ok(results) => {
-         sqlx::query("COMMIT").execute(&mut *guard).await?;
-         guard.detach_all().await?;
-         Ok(results)
-      }
-      Err(e) => match sqlx::query("ROLLBACK").execute(&mut *guard).await {
-         Ok(_) => {
-            if let Err(detach_err) = guard.detach_all().await {
-               error!("detach_all failed after rollback: {}", detach_err);
-            }
-            Err(e)
-         }
-         Err(rollback_err) => Err(Error::TransactionRollbackFailed {
-            transaction_error: e.to_string(),
-            rollback_error: rollback_err.to_string(),
-         }),
-      },
-   }
 }

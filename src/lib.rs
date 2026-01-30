@@ -16,8 +16,11 @@ mod wrapper;
 
 pub use error::{Error, Result};
 pub use sqlx_sqlite_conn_mgr::Migrator as SqliteMigrator;
-pub use transactions::{ActiveInterruptibleTransactions, ActiveRegularTransactions};
-pub use wrapper::{DatabaseWrapper, WriteQueryResult};
+pub use transactions::{ActiveInterruptibleTransactions, ActiveRegularTransactions, Statement};
+pub use wrapper::{
+   DatabaseWrapper, InterruptibleTransaction, InterruptibleTransactionBuilder,
+   TransactionExecutionBuilder, WriteQueryResult,
+};
 
 /// Database instances managed by the plugin.
 ///
@@ -176,7 +179,7 @@ impl Builder {
             commands::load,
             commands::execute,
             commands::execute_transaction,
-            commands::execute_interruptible_transaction,
+            commands::begin_interruptible_transaction,
             commands::transaction_continue,
             commands::transaction_read,
             commands::fetch_all,
