@@ -8,8 +8,16 @@ pub enum Error {
    HookRegistration(String),
 
    /// SQLx database error.
-   #[error("Database error: {0}")]
+   #[error("SQLx error: {0}")]
    Sqlx(#[from] sqlx::Error),
+
+   /// Failed to acquire connection from pool.
+   #[error("Failed to acquire connection from pool")]
+   PoolAcquire,
+
+   /// Database error (non-sqlx).
+   #[error("Database error: {0}")]
+   Database(String),
 
    /// Schema mismatch - table schema changed while observing.
    #[error(

@@ -19,19 +19,117 @@
 //! 2. **Provide your own SQLite** with `SQLITE_ENABLE_PREUPDATE_HOOK` compiled in.
 //!    Use [`is_preupdate_hook_enabled()`] to verify at runtime.
 //!
-//! # Status
+//! If preupdate hooks are not available, [`SqliteObserver::acquire()`] will return
+//! an error with a descriptive message.
 //!
-//! This crate is in early development. See the README for the planned API.
+//! # Features
+//!
+//! - **Transaction-safe notifications** - changes only notify after successful commit
+//! - **Typed column values** - access old/new values with native SQLite types
+//! - **Stream support** - use `tokio_stream::Stream` for async iteration
+//! - **Multiple subscribers** - broadcast channel supports multiple listeners
+//!
+//! # Basic Example
+//!
+//! ```rust,no_run
+//! use sqlx::SqlitePool;
+//! use sqlx_sqlite_observer::{SqliteObserver, ObserverConfig, ColumnValue};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let pool = SqlitePool::connect("sqlite:mydb.db").await?;
+//!     let observer = SqliteObserver::new(pool, ObserverConfig::default());
+//!
+//!     // Subscribe to changes on specific tables
+//!     let mut rx = observer.subscribe(["users"]);
+//!
+//!     // Spawn a task to handle notifications
+//!     tokio::spawn(async move {
+//!         while let Ok(change) = rx.recv().await {
+//!             println!(
+//!                 "Table {} row {} was {:?}",
+//!                 change.table,
+//!                 change.rowid.unwrap_or(-1),
+//!                 change.operation
+//!             );
+//!             // Access typed column values
+//!             if let Some(old) = &change.old_values {
+//!                 println!("  Old values: {:?}", old);
+//!             }
+//!             if let Some(new) = &change.new_values {
+//!                 println!("  New values: {:?}", new);
+//!             }
+//!         }
+//!     });
+//!
+//!     // Use the observer to execute queries
+//!     let mut conn = observer.acquire().await?;
+//!     sqlx::query("INSERT INTO users (name) VALUES (?)")
+//!         .bind("Alice")
+//!         .execute(&mut **conn)
+//!         .await?;
+//!
+//!     // Changes are published automatically when the transaction commits
+//!     drop(conn);
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Stream Example
+//!
+//! ```rust,no_run
+//! use futures::StreamExt;
+//! use sqlx::SqlitePool;
+//! use sqlx_sqlite_observer::{ChangeOperation, SqliteObserver, ObserverConfig, TableChangeStreamExt};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let pool = SqlitePool::connect("sqlite:mydb.db").await?;
+//!     let config = ObserverConfig::new().with_tables(["users", "posts"]);
+//!     let observer = SqliteObserver::new(pool, config);
+//!
+//!     // Get a Stream instead of broadcast::Receiver
+//!     let mut stream = observer.subscribe_stream(["users"]);
+//!
+//!     // Use standard Stream combinators
+//!     while let Some(change) = stream.next().await {
+//!         println!(
+//!             "Table {} row {} was {:?}",
+//!             change.table,
+//!             change.rowid.unwrap_or(-1),
+//!             change.operation
+//!         );
+//!         // Access typed column values
+//!         if let Some(old) = &change.old_values {
+//!             println!("  Old values: {:?}", old);
+//!         }
+//!         if let Some(new) = &change.new_values {
+//!             println!("  New values: {:?}", new);
+//!         }
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
 
 pub mod broker;
 pub mod change;
+pub mod config;
+pub mod connection;
 pub mod error;
 pub mod hooks;
+pub mod observer;
 pub mod schema;
+pub mod stream;
 
 pub use broker::ObservationBroker;
 pub use change::{ChangeOperation, ColumnValue, TableChange, TableInfo};
+pub use config::ObserverConfig;
+pub use connection::ObservableConnection;
 pub use error::Error;
 pub use hooks::{SqliteValue, is_preupdate_hook_enabled, unregister_hooks};
+pub use observer::SqliteObserver;
+pub use stream::{TableChangeStream, TableChangeStreamExt};
 
 pub type Result<T> = std::result::Result<T, Error>;
