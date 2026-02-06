@@ -91,6 +91,40 @@ impl ObservationBroker {
       self.table_info.write().insert(table.to_string(), info);
    }
 
+   /// Registers multiple tables for observation without schema info.
+   ///
+   /// This is a two-phase registration: tables are marked for observation immediately,
+   /// but primary key extraction will return empty `Vec` until [`set_table_info`] is
+   /// called for each table. This is useful when you want to register tables before
+   /// their schema is known (e.g., before the first connection is acquired).
+   ///
+   /// **Prefer [`observe_table`] when schema info is available**, as it atomically
+   /// registers the table and sets schema info in one call.
+   ///
+   /// [`set_table_info`]: Self::set_table_info
+   /// [`observe_table`]: Self::observe_table
+   pub fn observe_tables<I, S>(&self, tables: I)
+   where
+      I: IntoIterator<Item = S>,
+      S: AsRef<str>,
+   {
+      let mut observed = self.observed_tables.write();
+      for table in tables {
+         let table_name = table.as_ref().to_string();
+         trace!(table = %table_name, "Observing table");
+         observed.insert(table_name);
+      }
+   }
+
+   /// Sets the schema information for an observed table.
+   ///
+   /// This information is used to extract primary key values and determine
+   /// whether the rowid is meaningful for the table.
+   pub fn set_table_info(&self, table: &str, info: TableInfo) {
+      trace!(table = %table, pk_columns = ?info.pk_columns, without_rowid = info.without_rowid, "Setting table info");
+      self.table_info.write().insert(table.to_string(), info);
+   }
+
    /// Gets the schema information for an observed table.
    pub fn get_table_info(&self, table: &str) -> Option<TableInfo> {
       self.table_info.read().get(table).cloned()

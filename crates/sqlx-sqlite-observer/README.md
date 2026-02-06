@@ -98,14 +98,14 @@ This ensures subscribers **only receive notifications for committed changes**.
    * **`ChangeOperation`**: Insert, Update, or Delete
    * **`ColumnValue`**: Typed column value (Null, Integer, Real, Text, Blob)
    * **`ObserverConfig`**: Configuration for table filtering and channel
-     capacity <!-- COMING SOON -->
+     capacity
 
-### Observer Types <!-- COMING SOON -->
+### Observer Types
 
    * **`SqliteObserver`**: Main observer for `SqlitePool` connections
    * **`ObservableConnection`**: Connection wrapper with hooks registered
 
-### Stream Types <!-- COMING SOON -->
+### Stream Types
 
    * **`TableChangeStream`**: Async stream of table changes
    * **`TableChangeStreamExt`**: Extension trait for converting receivers to
@@ -177,19 +177,110 @@ meaningful/correct for non-integer or composite primary keys.
 
 ## Examples
 
-> **Coming in Phase 2** - Full working examples will be added in a subsequent PR.
-
 ### Basic Usage
 
-<!-- TODO: Add basic example showing SqliteObserver usage -->
+```rust,no_run
+use sqlx::SqlitePool;
+use sqlx_sqlite_observer::{SqliteObserver, ObserverConfig, ColumnValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = SqlitePool::connect("sqlite:mydb.db").await?;
+    let observer = SqliteObserver::new(pool, ObserverConfig::default());
+
+    // Subscribe to changes on specific tables
+    let mut rx = observer.subscribe(["users"]);
+
+    // Spawn a task to handle notifications
+    tokio::spawn(async move {
+        while let Ok(change) = rx.recv().await {
+            println!(
+                "Table {} row {} was {:?}",
+                change.table,
+                change.rowid.unwrap_or(-1),
+                change.operation
+            );
+            if let Some(ColumnValue::Integer(id)) = change.primary_key.first() {
+                println!("  PK: {}", id);
+            }
+        }
+    });
+
+    // Use the observer to execute queries
+    let mut conn = observer.acquire().await?;
+    sqlx::query("INSERT INTO users (name) VALUES (?)")
+        .bind("Alice")
+        .execute(&mut **conn)
+        .await?;
+
+    Ok(())
+}
+```
 
 ### Stream API
 
-<!-- TODO: Add stream example showing TableChangeStream usage -->
+```rust,no_run
+use futures::StreamExt;
+use sqlx::SqlitePool;
+use sqlx_sqlite_observer::{SqliteObserver, ObserverConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = SqlitePool::connect("sqlite:mydb.db").await?;
+    let config = ObserverConfig::new().with_tables(["users", "posts"]);
+    let observer = SqliteObserver::new(pool, config);
+
+    let mut stream = observer.subscribe_stream(["users"]);
+
+    while let Some(change) = stream.next().await {
+        println!(
+            "Table {} row {} was {:?}",
+            change.table,
+            change.rowid.unwrap_or(-1),
+            change.operation
+        );
+    }
+
+    Ok(())
+}
+```
 
 ### Value Capture
 
-<!-- TODO: Add example showing old/new column value access -->
+```rust,no_run
+use sqlx::SqlitePool;
+use sqlx_sqlite_observer::{SqliteObserver, ObserverConfig, ColumnValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = SqlitePool::connect("sqlite:mydb.db").await?;
+    let config = ObserverConfig::new().with_tables(["users"]);
+    let observer = SqliteObserver::new(pool, config);
+
+    let mut rx = observer.subscribe(["users"]);
+    let change = rx.recv().await?;
+
+    // Access old/new column values
+    if let Some(old) = &change.old_values {
+        println!("Old values: {:?}", old);
+    }
+    if let Some(new) = &change.new_values {
+        println!("New values: {:?}", new);
+    }
+
+    // Disable value capture for lower memory usage
+    let config = ObserverConfig::new()
+        .with_tables(["users"])
+        .with_capture_values(false);
+    let observer = SqliteObserver::new(
+        SqlitePool::connect("sqlite:mydb.db").await?,
+        config,
+    );
+    // old_values and new_values will be None
+
+    Ok(())
+}
+```
 
 ### SQLx SQLite Connection Manager Integration
 
@@ -204,8 +295,6 @@ buffered. All changes in a transaction are delivered at once on commit. If your
 transaction contains more mutating statements than this capacity, **messages
 will be dropped**.
 
-<!-- COMING SOON -->
-
 ```rust
 let config = ObserverConfig::new()
     .with_tables(["users", "posts"])
@@ -216,8 +305,6 @@ let config = ObserverConfig::new()
 
 By default, `TableChange` includes `old_values` and `new_values` with the actual
 column data. Disable this for lower memory usage if you only need row IDs:
-
-<!-- COMING SOON -->
 
 ```rust
 let config = ObserverConfig::new()
