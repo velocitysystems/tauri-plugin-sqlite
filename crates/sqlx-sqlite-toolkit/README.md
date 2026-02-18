@@ -278,6 +278,24 @@ All errors provide an `error_code()` method returning a machine-readable string:
 | `INVALID_COLUMN_NAME` | Keyset column name contains invalid characters |
 | `CONFLICTING_CURSORS` | Both `after` and `before` cursors provided |
 
+## Examples
+
+Working Tauri apps demonstrating the toolkit's features are in the
+[`examples/`](../../examples) directory:
+
+| App | Description |
+| --- | ----------- |
+| [`observer-demo`](../../examples/observer-demo) | Real-time change notifications using the observer subsystem — subscribe to table changes and see inserts, updates, and deletes streamed live |
+| [`pagination-demo`](../../examples/pagination-demo) | Keyset pagination with a virtualized list — browse large datasets page-by-page with forward/backward navigation and performance metrics |
+
+Both are Vue 3 + Tauri apps. To run one:
+
+```bash
+cd examples/observer-demo   # or pagination-demo
+npm install
+cargo tauri dev
+```
+
 ## Development
 
 ```bash

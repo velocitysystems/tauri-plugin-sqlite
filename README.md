@@ -61,6 +61,7 @@ without Tauri:
 | -------------------- | --------------- | ---------------- | ------------------- |
 | SELECT (multiple)    | `fetchAll()`    | Read pool        | Multiple concurrent |
 | SELECT (single)      | `fetchOne()`    | Read pool        | Multiple concurrent |
+| SELECT (paginated)   | `fetchPage()`   | Read pool        | Multiple concurrent |
 | INSERT/UPDATE/DELETE | `execute()`     | Write connection | Serialized          |
 | DDL (CREATE, etc.)   | `execute()`     | Write connection | Serialized          |
 
@@ -268,6 +269,64 @@ if (user) {
 }
 ```
 
+### Pagination
+
+When working with large result sets, loading all rows at once can cause
+performance degradation and excessive memory usage on both the Rust and
+TypeScript sides. The plugin provides built-in pagination to fetch data in
+fixed-size pages, keeping memory usage bounded and queries fast regardless
+of total row count.
+
+#### Why Keyset Pagination
+
+The plugin uses keyset (cursor-based) pagination rather than traditional
+OFFSET-based pagination. With OFFSET, the database must scan and discard
+all skipped rows on every page request, making deeper pages progressively
+slower. Keyset pagination uses indexed column values from the last row of
+the current page to seek directly to the next page, keeping query time
+constant no matter how far you paginate.
+
+```typescript
+import type { KeysetColumn } from '@silvermine/tauri-plugin-sqlite';
+
+type Post = { id: number; title: string; category: string; score: number };
+
+const keyset: KeysetColumn[] = [
+   { name: 'category', direction: 'asc' },
+   { name: 'score', direction: 'desc' },
+   { name: 'id', direction: 'asc' },
+];
+
+// First page
+const page = await db.fetchPage<Post>(
+   'SELECT id, title, category, score FROM posts',
+   [],
+   keyset,
+   25,
+);
+
+// Next page (forward) — pass the cursor from the previous page
+if (page.nextCursor) {
+   const nextPage = await db.fetchPage<Post>(
+      'SELECT id, title, category, score FROM posts',
+      [],
+      keyset,
+      25,
+   ).after(page.nextCursor);
+
+   // Previous page (backward) — rows are returned in original sort order
+   const prevPage = await db.fetchPage<Post>(
+      'SELECT id, title, category, score FROM posts',
+      [],
+      keyset,
+      25,
+   ).before(page.nextCursor);
+}
+```
+
+The base query must not contain `ORDER BY` or `LIMIT` clauses — the builder
+appends these automatically based on the keyset definition.
+
 ### Transactions
 
 For most cases, use `executeTransaction()` to run multiple statements atomically:
@@ -338,8 +397,8 @@ Each attached database gets a schema name that acts as a namespace for its
 tables.
 
 **Builder Pattern:** All query methods (`execute`, `executeTransaction`,
-`fetchAll`, `fetchOne`) return builders that support `.attach()` for
-cross-database operations.
+`fetchAll`, `fetchOne`, `fetchPage`) return builders that support `.attach()`
+for cross-database operations.
 
 ```typescript
 // Join data from multiple databases
@@ -509,6 +568,7 @@ await db.remove();           // Close and DELETE database file(s) - irreversible
 | `beginInterruptibleTransaction(statements)` | Begin interruptible transaction, returns `InterruptibleTransaction` |
 | `fetchAll<T>(query, values?)` | Execute SELECT, return all rows |
 | `fetchOne<T>(query, values?)` | Execute SELECT, return single row or `undefined` |
+| `fetchPage<T>(query, values, keyset, pageSize)` | Keyset pagination, returns `FetchPageBuilder` |
 | `close()` | Close connection, returns `true` if was loaded |
 | `remove()` | Close and delete database file(s), returns `true` if was loaded |
 | `observe(tables, config?)` | Enable change observation for tables |
@@ -517,12 +577,15 @@ await db.remove();           // Close and DELETE database file(s) - irreversible
 
 ### Builder Methods
 
-All query methods (`execute`, `executeTransaction`, `fetchAll`, `fetchOne`)
-return builders that are directly awaitable and support method chaining:
+All query methods (`execute`, `executeTransaction`, `fetchAll`, `fetchOne`,
+`fetchPage`) return builders that are directly awaitable and support method
+chaining:
 
 | Method | Description |
 | ------ | ----------- |
 | `attach(specs)` | Attach databases for cross-database queries, returns `this` |
+| `after(cursor)` | Set cursor for forward pagination (`FetchPageBuilder` only), returns `this` |
+| `before(cursor)` | Set cursor for backward pagination (`FetchPageBuilder` only), returns `this` |
 | `await builder` | Execute the query (builders implement `PromiseLike`) |
 
 ### InterruptibleTransaction Methods
@@ -567,6 +630,19 @@ interface SqliteError {
 interface ObserverConfig {
    channelCapacity?: number;  // default: 256
    captureValues?: boolean;   // default: true
+}
+
+type SortDirection = 'asc' | 'desc';
+
+interface KeysetColumn {
+   name: string;       // Column name in the query result set
+   direction: SortDirection;
+}
+
+interface KeysetPage<T = Record<string, SqlValue>> {
+   rows: T[];
+   nextCursor: SqlValue[] | null;  // Cursor to continue pagination, null when no more pages
+   hasMore: boolean;
 }
 
 type ChangeOperation = 'insert' | 'update' | 'delete';
@@ -644,6 +720,47 @@ let user = db.fetch_one(
 
 if let Some(user_data) = user {
    println!("Found user: {:?}", user_data);
+}
+```
+
+### Pagination (Rust)
+
+See [Pagination](#pagination) above for background on why the plugin uses
+keyset pagination. The Rust API works the same way via `fetch_page`:
+
+```rust
+use sqlx_sqlite_toolkit::pagination::KeysetColumn;
+
+let keyset = vec![
+   KeysetColumn::asc("category"),
+   KeysetColumn::desc("score"),
+   KeysetColumn::asc("id"),
+];
+
+// First page
+let page = db.fetch_page(
+   "SELECT id, title, category, score FROM posts".into(),
+   vec![],
+   keyset.clone(),
+   25,
+).await?;
+
+// Next page (forward)
+if let Some(cursor) = page.next_cursor {
+   let next = db.fetch_page(
+      "SELECT id, title, category, score FROM posts".into(),
+      vec![],
+      keyset.clone(),
+      25,
+   ).after(cursor.clone()).await?;
+
+   // Previous page (backward) — rows returned in original sort order
+   let prev = db.fetch_page(
+      "SELECT id, title, category, score FROM posts".into(),
+      vec![],
+      keyset,
+      25,
+   ).before(cursor).await?;
 }
 ```
 
@@ -771,6 +888,7 @@ db.remove().await?;  // Close and DELETE database file(s)
 | `begin_interruptible_transaction()` | Begin interruptible transaction (builder) |
 | `fetch_all(query, values)` | Fetch all rows |
 | `fetch_one(query, values)` | Fetch single row |
+| `fetch_page(query, values, keyset, page_size)` | Keyset pagination (builder, supports `.after()`, `.before()`, `.attach()`) |
 | `close()` | Close connection |
 | `remove()` | Close and delete database file(s) |
 
@@ -817,6 +935,18 @@ fn main() {
       .expect("error while running tauri application");
 }
 ```
+
+## Examples
+
+Working Tauri demo apps are in the [`examples/`](examples) directory:
+
+   * **[`observer-demo`](examples/observer-demo)** — Real-time change
+     notifications with live streaming of inserts, updates, and deletes
+   * **[`pagination-demo`](examples/pagination-demo)** — Keyset pagination
+     with a virtualized list and performance metrics
+
+See the [toolkit crate README](crates/sqlx-sqlite-toolkit/README.md#examples)
+for setup instructions.
 
 ## Development
 
