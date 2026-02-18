@@ -292,7 +292,12 @@ impl DatabaseWrapper {
    /// Close the database connection.
    ///
    /// Checkpoints the WAL and closes all connection pools.
-   pub async fn close(self) -> Result<(), Error> {
+   /// If observation is enabled, it is disabled first to unregister SQLite hooks
+   /// and allow the write connection to close cleanly.
+   pub async fn close(mut self) -> Result<(), Error> {
+      #[cfg(feature = "observer")]
+      self.disable_observation();
+
       self.inner.close().await?;
       Ok(())
    }
@@ -300,7 +305,12 @@ impl DatabaseWrapper {
    /// Close the database connection and remove all database files.
    ///
    /// Removes the main database file, WAL, and SHM files.
-   pub async fn remove(self) -> Result<(), Error> {
+   /// If observation is enabled, it is disabled first to unregister SQLite hooks
+   /// and allow the write connection to close cleanly.
+   pub async fn remove(mut self) -> Result<(), Error> {
+      #[cfg(feature = "observer")]
+      self.disable_observation();
+
       self.inner.remove().await?;
       Ok(())
    }
@@ -310,9 +320,14 @@ impl DatabaseWrapper {
    /// After calling this, write operations will be tracked and subscribers
    /// can receive change notifications.
    ///
+   /// If observation is already enabled, the previous observer is disabled first.
+   /// This drops the old broadcast broker, causing existing subscriber streams to
+   /// terminate. Callers must re-subscribe after re-enabling observation.
+   ///
    /// Requires the `observer` feature.
    #[cfg(feature = "observer")]
    pub fn enable_observation(&mut self, config: ObserverConfig) {
+      self.disable_observation();
       self.observer = Some(ObservableSqliteDatabase::new(
          Arc::clone(&self.inner),
          config,

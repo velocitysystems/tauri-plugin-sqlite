@@ -3,6 +3,7 @@
 //! This module implements the Tauri command handlers that the frontend calls.
 //! Each command manages database connections through the DbInstances state.
 
+use futures::StreamExt;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -12,10 +13,17 @@ use sqlx_sqlite_toolkit::{
    DatabaseWrapper, Statement, TransactionWriter, WriteQueryResult,
 };
 use std::sync::Arc;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Runtime, State};
+use tracing::debug;
 use uuid::Uuid;
 
-use crate::{DbInstances, Error, MigrationEvent, MigrationStates, MigrationStatus, Result};
+use crate::{
+   DbInstances, Error, MigrationEvent, MigrationStates, MigrationStatus, Result,
+   subscriptions::{
+      ActiveSubscriptions, ObserverConfigParams, TableChangePayload, event_to_payload,
+   },
+};
 
 /// Token representing an active interruptible transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,8 +341,15 @@ pub async fn fetch_one(
 ///
 /// Returns `true` if the database was loaded and successfully closed.
 /// Returns `false` if the database was not loaded (nothing to close).
+/// Any active subscriptions for this database are aborted before closing.
 #[tauri::command]
-pub async fn close(db_instances: State<'_, DbInstances>, db: String) -> Result<bool> {
+pub async fn close(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+   db: String,
+) -> Result<bool> {
+   active_subs.remove_for_db(&db).await;
+
    let mut instances = db_instances.0.write().await;
 
    if let Some(wrapper) = instances.remove(&db) {
@@ -346,8 +361,16 @@ pub async fn close(db_instances: State<'_, DbInstances>, db: String) -> Result<b
 }
 
 /// Close all database connections
+///
+/// All active subscriptions are aborted before closing. Each wrapper's
+/// `close()` handles disabling its own observer at the crate level.
 #[tauri::command]
-pub async fn close_all(db_instances: State<'_, DbInstances>) -> Result<()> {
+pub async fn close_all(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+) -> Result<()> {
+   active_subs.abort_all().await;
+
    let mut instances = db_instances.0.write().await;
 
    // Collect all wrappers to close
@@ -371,8 +394,15 @@ pub async fn close_all(db_instances: State<'_, DbInstances>) -> Result<()> {
 ///
 /// Returns `true` if the database was loaded and successfully removed.
 /// Returns `false` if the database was not loaded (nothing to remove).
+/// Any active subscriptions for this database are aborted before removing.
 #[tauri::command]
-pub async fn remove(db_instances: State<'_, DbInstances>, db: String) -> Result<bool> {
+pub async fn remove(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+   db: String,
+) -> Result<bool> {
+   active_subs.remove_for_db(&db).await;
+
    let mut instances = db_instances.0.write().await;
 
    if let Some(wrapper) = instances.remove(&db) {
@@ -545,4 +575,136 @@ pub async fn transaction_read(
          Err(e.into())
       }
    }
+}
+
+/// Enable observation on a database for change notifications.
+///
+/// Must be called before `subscribe()`. Configures the observer with the
+/// specified tables and options.
+///
+/// If observation is already enabled, this will abort all existing subscriptions
+/// for this database, disable the previous observer, and enable a new one with
+/// the provided configuration. Callers must re-subscribe after re-calling this.
+#[tauri::command]
+pub async fn observe(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+   db: String,
+   tables: Vec<String>,
+   config: Option<ObserverConfigParams>,
+) -> Result<()> {
+   // Abort plugin-level subscription tasks before the crate-level
+   // enable_observation() drops the old broker
+   active_subs.remove_for_db(&db).await;
+
+   let mut instances = db_instances.0.write().await;
+
+   let wrapper = instances
+      .get_mut(&db)
+      .ok_or_else(|| Error::DatabaseNotLoaded(db.clone()))?;
+
+   let mut observer_config = sqlx_sqlite_observer::ObserverConfig::new().with_tables(tables);
+
+   if let Some(params) = config {
+      if let Some(capacity) = params.channel_capacity {
+         observer_config = observer_config.with_channel_capacity(capacity);
+      }
+      if let Some(capture) = params.capture_values {
+         observer_config = observer_config.with_capture_values(capture);
+      }
+   }
+
+   wrapper.enable_observation(observer_config);
+   Ok(())
+}
+
+/// Subscribe to change notifications for specific tables.
+///
+/// Returns a subscription ID that can be used to unsubscribe later.
+/// Change events are streamed to the frontend via Tauri Channel.
+///
+/// Requires `observe()` to have been called first.
+#[tauri::command]
+pub async fn subscribe(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+   db: String,
+   tables: Vec<String>,
+   on_event: Channel<TableChangePayload>,
+) -> Result<String> {
+   let instances = db_instances.0.read().await;
+
+   let wrapper = instances
+      .get(&db)
+      .ok_or_else(|| Error::DatabaseNotLoaded(db.clone()))?;
+
+   let observable = wrapper
+      .observable()
+      .ok_or_else(|| Error::ObservationNotEnabled(db.clone()))?;
+
+   // Create subscription stream
+   let mut stream = observable.subscribe_stream(tables);
+
+   // Generate unique subscription ID
+   let subscription_id = Uuid::new_v4().to_string();
+
+   // Spawn task to forward stream events to the Tauri Channel
+   let sub_id = subscription_id.clone();
+   let db_path = db.clone();
+   let active_subs_clone = active_subs.inner().clone();
+
+   let handle = tokio::spawn(async move {
+      while let Some(event) = stream.next().await {
+         let payload = event_to_payload(event);
+         if on_event.send(payload).is_err() {
+            // Channel closed (frontend disconnected)
+            debug!("Subscription {} channel closed, stopping", sub_id);
+            break;
+         }
+      }
+
+      // Clean up subscription when stream ends
+      active_subs_clone.remove(&sub_id).await;
+      debug!("Subscription {} for db {} ended", sub_id, db_path);
+   });
+
+   // Track subscription
+   active_subs
+      .insert(subscription_id.clone(), db.clone(), handle.abort_handle())
+      .await;
+
+   Ok(subscription_id)
+}
+
+/// Unsubscribe from change notifications.
+///
+/// Returns `true` if the subscription was found and removed.
+#[tauri::command]
+pub async fn unsubscribe(
+   active_subs: State<'_, ActiveSubscriptions>,
+   subscription_id: String,
+) -> Result<bool> {
+   Ok(active_subs.remove(&subscription_id).await)
+}
+
+/// Disable observation on a database.
+///
+/// Stops tracking changes and aborts all subscriptions for this database.
+#[tauri::command]
+pub async fn unobserve(
+   db_instances: State<'_, DbInstances>,
+   active_subs: State<'_, ActiveSubscriptions>,
+   db: String,
+) -> Result<()> {
+   // Abort all subscriptions for this database first
+   active_subs.remove_for_db(&db).await;
+
+   let mut instances = db_instances.0.write().await;
+
+   let wrapper = instances
+      .get_mut(&db)
+      .ok_or_else(|| Error::DatabaseNotLoaded(db.clone()))?;
+
+   wrapper.disable_observation();
+   Ok(())
 }
