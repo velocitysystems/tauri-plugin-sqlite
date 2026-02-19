@@ -651,7 +651,6 @@ pub async fn subscribe(
    // Spawn task to forward stream events to the Tauri Channel
    let sub_id = subscription_id.clone();
    let db_path = db.clone();
-   let active_subs_clone = active_subs.inner().clone();
 
    let handle = tokio::spawn(async move {
       while let Some(event) = stream.next().await {
@@ -663,8 +662,6 @@ pub async fn subscribe(
          }
       }
 
-      // Clean up subscription when stream ends
-      active_subs_clone.remove(&sub_id).await;
       debug!("Subscription {} for db {} ended", sub_id, db_path);
    });
 
