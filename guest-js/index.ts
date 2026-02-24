@@ -264,6 +264,42 @@ export interface MigrationEvent {
    error?: string;
 }
 
+// ─── Pagination Types ───
+
+/**
+ * Sort direction for a keyset column.
+ */
+export type SortDirection = 'asc' | 'desc';
+
+/**
+ * A column in the keyset used for cursor-based pagination.
+ */
+export interface KeysetColumn {
+
+   /** Column name as it appears in the query result set */
+   name: string;
+
+   /** Sort direction for this column */
+   direction: SortDirection;
+}
+
+/**
+ * A page of results from keyset pagination.
+ *
+ * @typeParam T - Row type, defaults to `Record<string, SqlValue>`
+ */
+export interface KeysetPage<T = Record<string, SqlValue>> {
+
+   /** The rows in this page */
+   rows: T[];
+
+   /** Cursor values to continue pagination, or null if there are no more pages */
+   nextCursor: SqlValue[] | null;
+
+   /** Whether there are more rows in the current pagination direction */
+   hasMore: boolean;
+}
+
 // ─── Observer Types ───
 
 /**
@@ -465,6 +501,90 @@ class FetchOneBuilder<T> implements PromiseLike<T | undefined> {
          db: this._db.path,
          query: this._query,
          values: this._bindValues,
+         attached: this._attached.length > 0 ? this._attached : null,
+      });
+   }
+}
+
+/**
+ * Builder for paginated SELECT queries using keyset (cursor-based) pagination
+ */
+class FetchPageBuilder<T> implements PromiseLike<KeysetPage<T>> {
+   private readonly _db: Database;
+   private readonly _query: string;
+   private readonly _bindValues: SqlValue[];
+   private readonly _keyset: KeysetColumn[];
+   private readonly _pageSize: number;
+   private _after: SqlValue[] | null;
+   private _before: SqlValue[] | null;
+   private _attached: AttachedDatabaseSpec[];
+
+   public constructor(
+      db: Database,
+      query: string,
+      bindValues: SqlValue[],
+      keyset: KeysetColumn[],
+      pageSize: number
+   ) {
+      this._db = db;
+      this._query = query;
+      this._bindValues = bindValues;
+      this._keyset = keyset;
+      this._pageSize = pageSize;
+      this._after = null;
+      this._before = null;
+      this._attached = [];
+   }
+
+   /**
+    * Set the cursor for fetching the next page (forward pagination).
+    *
+    * Pass the `nextCursor` from a previous `KeysetPage` to fetch the page
+    * that follows it in the original sort order.
+    */
+   public after(cursor: SqlValue[]): this {
+      this._after = cursor;
+      return this;
+   }
+
+   /**
+    * Set the cursor for fetching the previous page (backward pagination).
+    *
+    * Pass a cursor to fetch the page that precedes it in the original sort
+    * order. Rows are returned in the original sort order (not reversed).
+    */
+   public before(cursor: SqlValue[]): this {
+      this._before = cursor;
+      return this;
+   }
+
+   /**
+    * Attach databases for cross-database queries
+    */
+   public attach(specs: AttachedDatabaseSpec[]): this {
+      this._attached = specs;
+      return this;
+   }
+
+   /**
+    * Make the builder directly awaitable
+    */
+   public then<TResult1 = KeysetPage<T>, TResult2 = never>(
+      onfulfilled?: ((value: KeysetPage<T>) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+   ): PromiseLike<TResult1 | TResult2> {
+      return this._execute().then(onfulfilled, onrejected);
+   }
+
+   private async _execute(): Promise<KeysetPage<T>> {
+      return await invoke<KeysetPage<T>>('plugin:sqlite|fetch_page', {
+         db: this._db.path,
+         query: this._query,
+         values: this._bindValues,
+         keyset: this._keyset,
+         pageSize: this._pageSize,
+         after: this._after,
+         before: this._before,
          attached: this._attached.length > 0 ? this._attached : null,
       });
    }
@@ -869,6 +989,80 @@ export default class Database {
     */
    public fetchOne<T>(query: string, bindValues?: SqlValue[]): FetchOneBuilder<T> {
       return new FetchOneBuilder<T>(this, query, bindValues ?? []);
+   }
+
+   /**
+    * **fetchPage**
+    *
+    * Creates a builder for paginated SELECT queries using keyset (cursor-based)
+    * pagination. Keyset pagination avoids the performance degradation of
+    * OFFSET-based pagination on large datasets by using indexed column values
+    * to seek directly to the next or previous page.
+    *
+    * The base query must not contain ORDER BY or LIMIT clauses — the builder
+    * appends these automatically based on the keyset definition.
+    *
+    * SQLite uses `$1`, `$2`, etc. for parameter binding.
+    *
+    * @param query - SQL SELECT query (without ORDER BY or LIMIT)
+    * @param bindValues - Parameter values for the query
+    * @param keyset - Columns defining the sort order and cursor
+    * @param pageSize - Number of rows per page
+    *
+    * @example
+    * ```ts
+    * const keyset: KeysetColumn[] = [
+    *    { name: 'category', direction: 'asc' },
+    *    { name: 'score', direction: 'desc' },
+    *    { name: 'id', direction: 'asc' },
+    * ];
+    *
+    * // First page
+    * const page = await db.fetchPage<Post>(
+    *    'SELECT * FROM posts',
+    *    [],
+    *    keyset,
+    *    25,
+    * );
+    *
+    * // Next page (forward) — pass the cursor from the previous page
+    * if (page.nextCursor) {
+    *    const nextPage = await db.fetchPage<Post>(
+    *       'SELECT * FROM posts',
+    *       [],
+    *       keyset,
+    *       25,
+    *    ).after(page.nextCursor);
+    *
+    *    // Previous page (backward) — rows are returned in original sort order
+    *    const prevPage = await db.fetchPage<Post>(
+    *       'SELECT * FROM posts',
+    *       [],
+    *       keyset,
+    *       25,
+    *    ).before(page.nextCursor);
+    * }
+    *
+    * // With attached database
+    * const page = await db.fetchPage(
+    *    'SELECT * FROM posts',
+    *    [],
+    *    keyset,
+    *    25,
+    * ).attach([{
+    *    databasePath: 'archive.db',
+    *    schemaName: 'archive',
+    *    mode: 'readOnly',
+    * }]);
+    * ```
+    */
+   public fetchPage<T>(
+      query: string,
+      bindValues: SqlValue[],
+      keyset: KeysetColumn[],
+      pageSize: number
+   ): FetchPageBuilder<T> {
+      return new FetchPageBuilder<T>(this, query, bindValues, keyset, pageSize);
    }
 
    // ─── Observer Methods ───

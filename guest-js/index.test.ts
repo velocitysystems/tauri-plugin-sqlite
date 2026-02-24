@@ -10,6 +10,7 @@ import Database, {
    ColumnValue,
    TableChange,
    TableChangeEvent,
+   KeysetColumn,
 } from './index';
 
 let lastCmd = '',
@@ -44,6 +45,9 @@ beforeEach(() => {
       }
       if (cmd === 'plugin:sqlite|fetch_all') {
          return [];
+      }
+      if (cmd === 'plugin:sqlite|fetch_page') {
+         return { rows: [], nextCursor: null, hasMore: false };
       }
       if (cmd === 'plugin:sqlite|fetch_one') {
          return null;
@@ -195,6 +199,126 @@ describe('Database commands', () => {
             mode: 'readOnly',
          },
       ]);
+   });
+
+   it('fetch_page first page (no cursor)', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('t.db').fetchPage('SELECT * FROM posts', [], keyset, 25);
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs).toMatchObject({
+         db: 't.db',
+         query: 'SELECT * FROM posts',
+         values: [],
+         keyset: [ { name: 'id', direction: 'asc' } ],
+         pageSize: 25,
+         after: null,
+         before: null,
+         attached: null,
+      });
+   });
+
+   it('fetch_page with cursor via .after()', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('t.db')
+         .fetchPage('SELECT * FROM posts', [], keyset, 25)
+         .after([ 100 ]);
+
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs.after).toEqual([ 100 ]);
+      expect(lastArgs.before).toBeNull();
+   });
+
+   it('fetch_page with cursor via .before()', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('t.db')
+         .fetchPage('SELECT * FROM posts', [], keyset, 25)
+         .before([ 50 ]);
+
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs.before).toEqual([ 50 ]);
+      expect(lastArgs.after).toBeNull();
+   });
+
+   it('fetch_page with attached databases', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('main.db')
+         .fetchPage('SELECT * FROM posts', [], keyset, 25)
+         .attach([
+            {
+               databasePath: 'archive.db',
+               schemaName: 'archive',
+               mode: 'readOnly',
+            },
+         ]);
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs.db).toBe('main.db');
+      expect(lastArgs.after).toBeNull();
+      expect(lastArgs.before).toBeNull();
+      expect(lastArgs.attached).toEqual([
+         {
+            databasePath: 'archive.db',
+            schemaName: 'archive',
+            mode: 'readOnly',
+         },
+      ]);
+   });
+
+   it('fetch_page multi-column keyset with .after()', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'category', direction: 'asc' },
+         { name: 'score', direction: 'desc' },
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('t.db')
+         .fetchPage('SELECT * FROM posts WHERE active = $1', [ true ], keyset, 50)
+         .after([ 'tech', 95, 42 ]);
+
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs.keyset).toEqual([
+         { name: 'category', direction: 'asc' },
+         { name: 'score', direction: 'desc' },
+         { name: 'id', direction: 'asc' },
+      ]);
+      expect(lastArgs.values).toEqual([ true ]);
+      expect(lastArgs.after).toEqual([ 'tech', 95, 42 ]);
+      expect(lastArgs.before).toBeNull();
+      expect(lastArgs.pageSize).toBe(50);
+   });
+
+   it('fetch_page multi-column keyset with .before()', async () => {
+      const keyset: KeysetColumn[] = [
+         { name: 'category', direction: 'asc' },
+         { name: 'score', direction: 'desc' },
+         { name: 'id', direction: 'asc' },
+      ];
+
+      await Database.get('t.db')
+         .fetchPage('SELECT * FROM posts WHERE active = $1', [ true ], keyset, 50)
+         .before([ 'tech', 95, 42 ]);
+
+      expect(lastCmd).toBe('plugin:sqlite|fetch_page');
+      expect(lastArgs.keyset).toEqual([
+         { name: 'category', direction: 'asc' },
+         { name: 'score', direction: 'desc' },
+         { name: 'id', direction: 'asc' },
+      ]);
+      expect(lastArgs.values).toEqual([ true ]);
+      expect(lastArgs.before).toEqual([ 'tech', 95, 42 ]);
+      expect(lastArgs.after).toBeNull();
+      expect(lastArgs.pageSize).toBe(50);
    });
 
    it('close', async () => {
