@@ -59,5 +59,13 @@ jobs:
          - name: Run cargo check
            run: cargo check --workspace --all-targets
 
+         - name: Build example apps
+           run: |
+              for example in examples/*/; do
+                 echo "Building $example..."
+                 (cd "$example" && npm ci && npm run build)
+                 cargo check --manifest-path "${example}src-tauri/Cargo.toml"
+              done
+
          - name: Run TypeScript and Rust tests
            run: npm test
