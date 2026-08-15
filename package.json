@@ -20,7 +20,7 @@
    "scripts": {
       "build": "rollup -c",
       "check:iife": "rollup -c && git diff --exit-code api-iife.js",
-      "check-node-version": "check-node-version --npm 10.5.0",
+      "check-node-version": "check-node-version --node 24.19.0 --npm 11.17.0",
       "commitlint": "commitlint --from ${COMMITLINT_FROM:-002bcc8} --to ${COMMITLINT_TO:-HEAD}",
       "eslint": "eslint .",
       "eslint:fix": "eslint . --fix",
@@ -28,7 +28,7 @@
       "type-check": "run-p type-check:ts",
       "markdownlint": "markdownlint-cli2",
       "prepare": "rollup -c",
-      "standards": "npm run eslint && npm run type-check && npm run markdownlint && npm run check:iife && npm run rust:lint && npm run commitlint",
+      "standards": "npm run eslint && npm run type-check && npm run markdownlint && npm run check:iife && npm run rust:lint && npm run commitlint && npm run check-node-version",
       "rust:lint": "cargo lint-clippy && cargo lint-fmt",
       "rust:lint:fix": "cargo fix-clippy && cargo fix-fmt",
       "test": "vitest run && cargo test --workspace --lib --test '*'",
