@@ -668,7 +668,10 @@ mod tests {
          .fetch_all(&mut *conn)
          .await
          .unwrap();
-      let names: Vec<String> = rows.iter().map(|row| row.get::<String, _>("name")).collect();
+      let names: Vec<String> = rows
+         .iter()
+         .map(|row| row.get::<String, _>("name"))
+         .collect();
       assert_eq!(
          names,
          vec!["main".to_string()],
@@ -1061,7 +1064,10 @@ mod tests {
          .fetch_all(&mut *writer)
          .await
          .unwrap();
-      let names: Vec<String> = rows.iter().map(|row| row.get::<String, _>("name")).collect();
+      let names: Vec<String> = rows
+         .iter()
+         .map(|row| row.get::<String, _>("name"))
+         .collect();
       assert_eq!(
          names,
          vec!["main".to_string()],
@@ -1204,10 +1210,7 @@ mod tests {
 
    /// Builds `count` distinct single-table databases with distinct schema aliases,
    /// suitable for pushing past SQLite's default `SQLITE_LIMIT_ATTACHED` (10).
-   async fn build_many_attach_specs(
-      count: usize,
-      temp_dir: &TempDir,
-   ) -> Vec<AttachedSpec> {
+   async fn build_many_attach_specs(count: usize, temp_dir: &TempDir) -> Vec<AttachedSpec> {
       let mut specs = Vec::with_capacity(count);
       for i in 0..count {
          let db = create_test_db(&format!("many{i}.db"), temp_dir).await;

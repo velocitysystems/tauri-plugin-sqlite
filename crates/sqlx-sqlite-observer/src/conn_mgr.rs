@@ -435,8 +435,7 @@ pub async fn acquire_writer_with_attached_brokers(
          // and something to call `ensure_table_info()` on, which reads the
          // attached database's own read pool - so it's rebuilt from the
          // broker rather than read out whole. See `from_broker`'s doc.
-         let observable =
-            ObservableSqliteDatabase::from_broker(Arc::clone(&spec.database), broker);
+         let observable = ObservableSqliteDatabase::from_broker(Arc::clone(&spec.database), broker);
 
          // Fail loud rather than let `insert` silently overwrite. The
          // validation above already rules this out, so it should never fire;
