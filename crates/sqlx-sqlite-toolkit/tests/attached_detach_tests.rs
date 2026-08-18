@@ -216,7 +216,11 @@ async fn failed_attached_transaction_statement_still_releases_the_alias() {
       .fetch_all("SELECT msg FROM logs".into(), vec![])
       .await
       .expect("logs should be readable");
-   assert_eq!(rows.len(), 1, "the rolled-back 'ok' row must not be present");
+   assert_eq!(
+      rows.len(),
+      1,
+      "the rolled-back 'ok' row must not be present"
+   );
    assert_eq!(
       rows[0]["msg"].as_str(),
       Some("after failure"),
